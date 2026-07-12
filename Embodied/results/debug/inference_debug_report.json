@@ -1,0 +1,407 @@
+{
+  "pneumonia_image": "00011136_002.png",
+  "pneumonia_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_005/images/00011136_002.png",
+  "gt_boxes": [
+    [
+      574.008888888889,
+      574.90015625,
+      803.84,
+      741.0157118055561
+    ]
+  ],
+  "verdict": "PARTIAL: at least one chest X-ray task mode returned boxes (ground_multi). Prefer the successful native mode for ChestX-ray8 evaluation.",
+  "recommended_mode": "ground_multi",
+  "tests": [
+    {
+      "name": "TEST A \u2014 object/category detection via detect()",
+      "api_call": "LocateAnythingWorker.detect",
+      "api_args": {
+        "image": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_005/images/00011136_002.png",
+        "categories": [
+          "Pneumonia"
+        ]
+      },
+      "task_mode": "detect / category detection (note: 'matches' grammar)",
+      "raw_user_query_before_template": "Locate all the instances that matches the following description: Pneumonia.",
+      "final_prompt": "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image-1>Locate all the instances that matches the following description: Pneumonia.<|im_end|>\n<|im_start|>assistant\n",
+      "generation_config": {
+        "generation_mode": "hybrid",
+        "max_new_tokens": 2048,
+        "temperature": 0.7,
+        "do_sample": true,
+        "top_p": 0.9,
+        "top_k": null,
+        "repetition_penalty": 1.1,
+        "use_cache": true
+      },
+      "raw_generated_token_ids": [
+        [
+          151672,
+          47,
+          811,
+          372,
+          21251,
+          151673,
+          151668,
+          4064,
+          151669,
+          151645
+        ]
+      ],
+      "decoded_raw_output": "<ref>Pneumonia</ref><box>None</box><|im_end|>",
+      "parsed_references": [
+        "Pneumonia"
+      ],
+      "parsed_normalized_boxes": [],
+      "predicted_pixel_boxes": [],
+      "metrics": {
+        "iou_matrix": [
+          []
+        ],
+        "matches": [],
+        "gt_ious": [
+          0.0
+        ],
+        "matched_ious": [],
+        "mean_matched_iou": 0.0,
+        "maximum_iou": 0.0,
+        "recall_0_1": 0.0,
+        "recall_0_3": 0.0,
+        "recall_0_5": 0.0,
+        "n_gt": 1,
+        "n_pred": 0,
+        "n_matched": 0
+      },
+      "inference_time_sec": 3.76743473415263
+    },
+    {
+      "name": "TEST B \u2014 phrase grounding via ground_multi()",
+      "api_call": "LocateAnythingWorker.ground_multi",
+      "api_args": {
+        "image": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_005/images/00011136_002.png",
+        "phrase": "pneumonia"
+      },
+      "task_mode": "ground_multi / multi-box phrase grounding (note: 'match' grammar)",
+      "raw_user_query_before_template": "Locate all the instances that match the following description: pneumonia.",
+      "final_prompt": "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image-1>Locate all the instances that match the following description: pneumonia.<|im_end|>\n<|im_start|>assistant\n",
+      "generation_config": {
+        "generation_mode": "hybrid",
+        "max_new_tokens": 2048,
+        "temperature": 0.7,
+        "do_sample": true,
+        "top_p": 0.9,
+        "top_k": null,
+        "repetition_penalty": 1.1,
+        "use_cache": true
+      },
+      "raw_generated_token_ids": [
+        [
+          151672,
+          79,
+          811,
+          21251,
+          21251,
+          151673,
+          151668,
+          4064,
+          151669,
+          151645
+        ]
+      ],
+      "decoded_raw_output": "<ref>pneoniaonia</ref><box>None</box><|im_end|>",
+      "parsed_references": [
+        "pneoniaonia"
+      ],
+      "parsed_normalized_boxes": [],
+      "predicted_pixel_boxes": [],
+      "metrics": {
+        "iou_matrix": [
+          []
+        ],
+        "matches": [],
+        "gt_ious": [
+          0.0
+        ],
+        "matched_ious": [],
+        "mean_matched_iou": 0.0,
+        "maximum_iou": 0.0,
+        "recall_0_1": 0.0,
+        "recall_0_3": 0.0,
+        "recall_0_5": 0.0,
+        "n_gt": 1,
+        "n_pred": 0,
+        "n_matched": 0
+      },
+      "inference_time_sec": 2.2878565648570657
+    },
+    {
+      "name": "TEST C \u2014 radiology-context phrase grounding via ground_multi()",
+      "api_call": "LocateAnythingWorker.ground_multi",
+      "api_args": {
+        "image": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_005/images/00011136_002.png",
+        "phrase": "region showing pneumonia in the chest radiograph"
+      },
+      "task_mode": "ground_multi / multi-box phrase grounding",
+      "raw_user_query_before_template": "Locate all the instances that match the following description: region showing pneumonia in the chest radiograph.",
+      "final_prompt": "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image-1>Locate all the instances that match the following description: region showing pneumonia in the chest radiograph.<|im_end|>\n<|im_start|>assistant\n",
+      "generation_config": {
+        "generation_mode": "hybrid",
+        "max_new_tokens": 2048,
+        "temperature": 0.7,
+        "do_sample": true,
+        "top_p": 0.9,
+        "top_k": null,
+        "repetition_penalty": 1.1,
+        "use_cache": true
+      },
+      "raw_generated_token_ids": [
+        [
+          151672,
+          3943,
+          9027,
+          68229,
+          304,
+          279,
+          15138,
+          11900,
+          3178,
+          151673,
+          151668,
+          151792,
+          151843,
+          152123,
+          152496,
+          151669,
+          151668,
+          152222,
+          151857,
+          152487,
+          152455,
+          151669,
+          151645
+        ]
+      ],
+      "decoded_raw_output": "<ref>region showing pneumonia in the chest radiograph</ref><box><115><166><446><819></box><box><545><180><810><778></box><|im_end|>",
+      "parsed_references": [
+        "region showing pneumonia in the chest radiograph"
+      ],
+      "parsed_normalized_boxes": [
+        [
+          115.0,
+          166.0,
+          446.0,
+          819.0
+        ],
+        [
+          545.0,
+          180.0,
+          810.0,
+          778.0
+        ]
+      ],
+      "predicted_pixel_boxes": [
+        [
+          117.76,
+          169.984,
+          456.704,
+          838.656
+        ],
+        [
+          558.08,
+          184.32,
+          829.44,
+          796.672
+        ]
+      ],
+      "metrics": {
+        "iou_matrix": [
+          [
+            0.0,
+            0.22975879689032605
+          ]
+        ],
+        "matches": [
+          [
+            0,
+            1,
+            0.22975879689032605
+          ]
+        ],
+        "gt_ious": [
+          0.22975879689032605
+        ],
+        "matched_ious": [
+          0.22975879689032605
+        ],
+        "mean_matched_iou": 0.22975879689032605,
+        "maximum_iou": 0.22975879689032605,
+        "recall_0_1": 1.0,
+        "recall_0_3": 0.0,
+        "recall_0_5": 0.0,
+        "n_gt": 1,
+        "n_pred": 2,
+        "n_matched": 1
+      },
+      "inference_time_sec": 2.5995535037945956
+    },
+    {
+      "name": "POSITIVE CONTROL \u2014 natural image detect(['cat','couch'])",
+      "api_call": "LocateAnythingWorker.detect",
+      "api_args": {
+        "image": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/results/debug/positive_control.jpg",
+        "categories": [
+          "cat",
+          "couch"
+        ]
+      },
+      "task_mode": "detect / category detection",
+      "raw_user_query_before_template": "Locate all the instances that matches the following description: cat</c>couch.",
+      "final_prompt": "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image-1>Locate all the instances that matches the following description: cat</c>couch.<|im_end|>\n<|im_start|>assistant\n",
+      "generation_config": {
+        "generation_mode": "hybrid",
+        "max_new_tokens": 2048,
+        "temperature": 0.7,
+        "do_sample": true,
+        "top_p": 0.9,
+        "top_k": null,
+        "repetition_penalty": 1.1,
+        "use_cache": true
+      },
+      "raw_generated_token_ids": [
+        [
+          151672,
+          4616,
+          151673,
+          151668,
+          151686,
+          151789,
+          152171,
+          152665,
+          151669,
+          151668,
+          152216,
+          151729,
+          152675,
+          152452,
+          151669,
+          151672,
+          66,
+          3026,
+          151673,
+          151668,
+          151677,
+          151677,
+          152675,
+          152675,
+          151669,
+          151645
+        ]
+      ],
+      "decoded_raw_output": "<ref>cat</ref><box><9><112><494><988></box><box><539><52><998><775></box><ref>couch</ref><box><0><0><998><998></box><|im_end|>",
+      "parsed_references": [
+        "cat",
+        "couch"
+      ],
+      "parsed_normalized_boxes": [
+        [
+          9.0,
+          112.0,
+          494.0,
+          988.0
+        ],
+        [
+          539.0,
+          52.0,
+          998.0,
+          775.0
+        ],
+        [
+          0.0,
+          0.0,
+          998.0,
+          998.0
+        ]
+      ],
+      "predicted_pixel_boxes": [
+        [
+          5.76,
+          53.76,
+          316.15999999999997,
+          474.24
+        ],
+        [
+          344.96000000000004,
+          24.959999999999997,
+          638.72,
+          372.0
+        ],
+        [
+          0.0,
+          0.0,
+          638.72,
+          479.04
+        ]
+      ],
+      "metrics": null,
+      "inference_time_sec": 0.550404089037329
+    },
+    {
+      "name": "POSITIVE CONTROL \u2014 natural image ground_multi('cat')",
+      "api_call": "LocateAnythingWorker.ground_multi",
+      "api_args": {
+        "image": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/results/debug/positive_control.jpg",
+        "phrase": "cat"
+      },
+      "task_mode": "ground_multi / phrase grounding",
+      "raw_user_query_before_template": "Locate all the instances that match the following description: cat.",
+      "final_prompt": "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n<image-1>Locate all the instances that match the following description: cat.<|im_end|>\n<|im_start|>assistant\n",
+      "generation_config": {
+        "generation_mode": "hybrid",
+        "max_new_tokens": 2048,
+        "temperature": 0.7,
+        "do_sample": true,
+        "top_p": 0.9,
+        "top_k": null,
+        "repetition_penalty": 1.1,
+        "use_cache": true
+      },
+      "raw_generated_token_ids": [
+        [
+          151672,
+          4616,
+          151673,
+          151668,
+          151677,
+          151792,
+          152172,
+          152662,
+          151669,
+          151645
+        ]
+      ],
+      "decoded_raw_output": "<ref>cat</ref><box><0><115><495><985></box><|im_end|>",
+      "parsed_references": [
+        "cat"
+      ],
+      "parsed_normalized_boxes": [
+        [
+          0.0,
+          115.0,
+          495.0,
+          985.0
+        ]
+      ],
+      "predicted_pixel_boxes": [
+        [
+          0.0,
+          55.2,
+          316.8,
+          472.8
+        ]
+      ],
+      "metrics": null,
+      "inference_time_sec": 0.5961050349287689
+    }
+  ],
+  "double_template_check": "Eval uses predict(full ground_multi instruction). This is NOT double-templating. Equivalent to ground_multi(image, disease)."
+}

@@ -1,0 +1,186 @@
+{
+  "seed": 42,
+  "n": 20,
+  "samples": [
+    {
+      "file": "00020277_001_Effusion.png",
+      "image": "00020277_001.png",
+      "disease": "Effusion",
+      "iou": 0.076165,
+      "n_gt": 1,
+      "n_pred": 1,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_009/images/00020277_001.png"
+    },
+    {
+      "file": "00004911_018_Nodule.png",
+      "image": "00004911_018.png",
+      "disease": "Nodule",
+      "iou": 0.0,
+      "n_gt": 1,
+      "n_pred": 0,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_003/images/00004911_018.png"
+    },
+    {
+      "file": "00000744_006_Atelectasis.png",
+      "image": "00000744_006.png",
+      "disease": "Atelectasis",
+      "iou": 0.081873,
+      "n_gt": 1,
+      "n_pred": 2,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_001/images/00000744_006.png"
+    },
+    {
+      "file": "00022883_002_Atelectasis.png",
+      "image": "00022883_002.png",
+      "disease": "Atelectasis",
+      "iou": 0.153354,
+      "n_gt": 1,
+      "n_pred": 2,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_010/images/00022883_002.png"
+    },
+    {
+      "file": "00011925_072_Infiltration.png",
+      "image": "00011925_072.png",
+      "disease": "Infiltration",
+      "iou": 0.577932,
+      "n_gt": 1,
+      "n_pred": 1,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_006/images/00011925_072.png"
+    },
+    {
+      "file": "00011237_006_Pneumonia.png",
+      "image": "00011237_006.png",
+      "disease": "Pneumonia",
+      "iou": 0.190714,
+      "n_gt": 1,
+      "n_pred": 2,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_005/images/00011237_006.png"
+    },
+    {
+      "file": "00010610_003_Pneumonia.png",
+      "image": "00010610_003.png",
+      "disease": "Pneumonia",
+      "iou": 0.20675,
+      "n_gt": 1,
+      "n_pred": 2,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_005/images/00010610_003.png"
+    },
+    {
+      "file": "00006821_002_Mass.png",
+      "image": "00006821_002.png",
+      "disease": "Mass",
+      "iou": 0.208668,
+      "n_gt": 1,
+      "n_pred": 1,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_004/images/00006821_002.png"
+    },
+    {
+      "file": "00022706_001_Cardiomegaly.png",
+      "image": "00022706_001.png",
+      "disease": "Cardiomegaly",
+      "iou": 0.362727,
+      "n_gt": 1,
+      "n_pred": 1,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_010/images/00022706_001.png"
+    },
+    {
+      "file": "00004461_000_Cardiomegaly.png",
+      "image": "00004461_000.png",
+      "disease": "Cardiomegaly",
+      "iou": 0.659456,
+      "n_gt": 1,
+      "n_pred": 1,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_003/images/00004461_000.png"
+    },
+    {
+      "file": "00021321_002_Pneumothorax.png",
+      "image": "00021321_002.png",
+      "disease": "Pneumothorax",
+      "iou": 0.342861,
+      "n_gt": 1,
+      "n_pred": 2,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_010/images/00021321_002.png"
+    },
+    {
+      "file": "00022837_005_Mass.png",
+      "image": "00022837_005.png",
+      "disease": "Mass",
+      "iou": 0.0,
+      "n_gt": 1,
+      "n_pred": 0,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_010/images/00022837_005.png"
+    },
+    {
+      "file": "00028876_027_Pneumothorax.png",
+      "image": "00028876_027.png",
+      "disease": "Pneumothorax",
+      "iou": 0.201237,
+      "n_gt": 1,
+      "n_pred": 2,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_012/images/00028876_027.png"
+    },
+    {
+      "file": "00018233_057_Cardiomegaly.png",
+      "image": "00018233_057.png",
+      "disease": "Cardiomegaly",
+      "iou": 0.749907,
+      "n_gt": 1,
+      "n_pred": 1,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_008/images/00018233_057.png"
+    },
+    {
+      "file": "00003945_004_Atelectasis.png",
+      "image": "00003945_004.png",
+      "disease": "Atelectasis",
+      "iou": 0.228121,
+      "n_gt": 1,
+      "n_pred": 2,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_003/images/00003945_004.png"
+    },
+    {
+      "file": "00019124_104_Pneumothorax.png",
+      "image": "00019124_104.png",
+      "disease": "Pneumothorax",
+      "iou": 0.0,
+      "n_gt": 1,
+      "n_pred": 1,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_009/images/00019124_104.png"
+    },
+    {
+      "file": "00014795_002_Atelectasis.png",
+      "image": "00014795_002.png",
+      "disease": "Atelectasis",
+      "iou": 0.082509,
+      "n_gt": 1,
+      "n_pred": 2,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_007/images/00014795_002.png"
+    },
+    {
+      "file": "00000902_001_Mass.png",
+      "image": "00000902_001.png",
+      "disease": "Mass",
+      "iou": 0.0,
+      "n_gt": 1,
+      "n_pred": 0,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_001/images/00000902_001.png"
+    },
+    {
+      "file": "00000845_000_Cardiomegaly.png",
+      "image": "00000845_000.png",
+      "disease": "Cardiomegaly",
+      "iou": 0.694906,
+      "n_gt": 1,
+      "n_pred": 1,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_001/images/00000845_000.png"
+    },
+    {
+      "file": "00004342_023_Cardiomegaly.png",
+      "image": "00004342_023.png",
+      "disease": "Cardiomegaly",
+      "iou": 0.37957,
+      "n_gt": 1,
+      "n_pred": 1,
+      "image_path": "/auto/data2/ykorkmaz/nih-chest-xrays/data/versions/3/images_003/images/00004342_023.png"
+    }
+  ]
+}
