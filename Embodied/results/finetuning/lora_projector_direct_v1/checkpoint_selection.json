@@ -1,0 +1,8 @@
+{
+  "label": "final_checkpoint",
+  "criterion": "end_of_training",
+  "path": "results/finetuning/lora_projector_direct_v1/checkpoint-450",
+  "lowest_train_loss_at_save_steps": "results/finetuning/lora_projector_direct_v1/checkpoint-375",
+  "lowest_train_loss_value": 1.1660312414169312,
+  "validation_evaluated": false
+}

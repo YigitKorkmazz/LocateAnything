@@ -65,14 +65,14 @@ BOX_RE = re.compile(r"<box><(\d+)><(\d+)><(\d+)><(\d+)></box>")
 
 
 def build_prompt_phrase(disease: str, prompt_strategy: str) -> str:
-    """Semantic phrase / query text for the chosen prompt strategy."""
+    """Semantic phrase written into ``<ref>...</ref>`` for the chosen strategy."""
     if prompt_strategy == "bare_label":
         return disease.lower()
     if prompt_strategy == "radiology_context":
         return RADIOLOGY_CONTEXT_PHRASE_TEMPLATE.format(disease=disease.lower())
     if prompt_strategy == "direct_disease":
-        # Keep ChestX-ray8 casing, e.g. "Atelectasis", "Infiltration".
-        return DIRECT_DISEASE_QUERY_TEMPLATE.format(disease=disease)
+        # Keep ChestX-ray8 casing inside <ref>, e.g. "Atelectasis".
+        return disease
     raise ValueError(f"Unknown prompt strategy: {prompt_strategy}")
 
 
@@ -82,10 +82,12 @@ def render_ground_multi_query(phrase: str) -> str:
 
 
 def build_final_user_query(disease: str, prompt_strategy: str) -> Tuple[str, str]:
-    """Return (prompt_phrase, final_rendered_user_query)."""
+    """Return (prompt_phrase_for_ref, final_rendered_user_query)."""
     phrase = build_prompt_phrase(disease, prompt_strategy)
     if prompt_strategy == "direct_disease":
-        return phrase, phrase
+        # User utterance is the full locate sentence; <ref> keeps the disease label.
+        user_query = DIRECT_DISEASE_QUERY_TEMPLATE.format(disease=disease)
+        return phrase, user_query
     return phrase, render_ground_multi_query(phrase)
 
 

@@ -1,0 +1,65 @@
+{
+  "seed": 42,
+  "prompt_strategy": "direct_disease",
+  "split_unit": "patient_id",
+  "total_image_disease_pairs": 984,
+  "n_train_pairs": 725,
+  "n_val_pairs": 65,
+  "n_test_pairs": 194,
+  "n_unique_train_images": 644,
+  "n_unique_val_images": 63,
+  "n_unique_test_images": 173,
+  "n_unique_train_patients": 523,
+  "n_unique_val_patients": 58,
+  "n_unique_test_patients": 145,
+  "class_distribution_train": {
+    "Atelectasis": 130,
+    "Cardiomegaly": 102,
+    "Effusion": 121,
+    "Infiltration": 96,
+    "Mass": 67,
+    "Nodule": 57,
+    "Pneumonia": 85,
+    "Pneumothorax": 67
+  },
+  "class_distribution_val": {
+    "Atelectasis": 11,
+    "Cardiomegaly": 10,
+    "Effusion": 8,
+    "Infiltration": 6,
+    "Mass": 4,
+    "Nodule": 7,
+    "Pneumonia": 7,
+    "Pneumothorax": 12
+  },
+  "class_distribution_test": {
+    "Atelectasis": 39,
+    "Cardiomegaly": 34,
+    "Effusion": 24,
+    "Infiltration": 21,
+    "Mass": 14,
+    "Nodule": 15,
+    "Pneumonia": 28,
+    "Pneumothorax": 19
+  },
+  "leakage_check": {
+    "train_test_image_overlap": [],
+    "train_test_patient_overlap": [],
+    "train_test_leakage_free": true,
+    "train_val_image_overlap": [],
+    "train_val_patient_overlap": [],
+    "val_test_image_overlap": [],
+    "val_test_patient_overlap": [],
+    "val_leakage_free": true
+  },
+  "paths": {
+    "train_pairs": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/train_pairs_seed42.jsonl",
+    "val_pairs": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/val_pairs_seed42.jsonl",
+    "test_pairs": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/test_pairs_seed42.jsonl",
+    "train_sharegpt": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/data/train_sharegpt_seed42.jsonl",
+    "val_sharegpt": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/data/val_sharegpt_seed42.jsonl",
+    "test_sharegpt": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/data/test_sharegpt_seed42.jsonl"
+  },
+  "user_query_example": "Locate the Atelectasis in this chest X-ray",
+  "assistant_target_example": "<ref>Atelectasis</ref><box>..."
+}

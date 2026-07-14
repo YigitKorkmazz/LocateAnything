@@ -1,0 +1,2 @@
+results/finetuning/lora_projector_direct_v1/checkpoint-450
+# NOTE: this is the FINAL checkpoint, not validation-selected best.

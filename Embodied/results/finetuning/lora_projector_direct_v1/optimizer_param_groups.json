@@ -1,0 +1,7 @@
+{
+  "n_groups": 2,
+  "lora_lr": 2e-05,
+  "projector_lr": 1e-05,
+  "n_lora_params": 14966784,
+  "n_mlp1_params": 13644800
+}

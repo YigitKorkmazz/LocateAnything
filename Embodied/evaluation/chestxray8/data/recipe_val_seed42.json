@@ -1,0 +1,8 @@
+{
+  "chestxray8_val": {
+    "annotation": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/data/val_sharegpt_seed42.jsonl",
+    "root": "",
+    "repeat_time": 1.0,
+    "data_augment": false
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "n_groups": 1,
+  "lora_or_default_lr": 2e-05,
+  "n_default_params": 14966784
+}

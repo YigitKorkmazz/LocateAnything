@@ -1,0 +1,234 @@
+{
+  "timestamp": "2026-07-14T10:07:13.840642+00:00",
+  "split_file": "evaluation/chestxray8/splits/test_pairs_seed42.jsonl",
+  "excel_path": "results/finetuning/lora_projector_direct_v1_eval/loradirect2.xlsx",
+  "overall": [
+    {
+      "Run": "base_zero_shot",
+      "Total Images": 173,
+      "Total Image-Disease Pairs": 194,
+      "Total GT Boxes": 194,
+      "Total Predicted Boxes": 241,
+      "No-Prediction Rate": 0.04639175257731959,
+      "Mean IoU": 0.1261865255340169,
+      "Median IoU": 0.06984670781854872,
+      "Recall@0.1": 0.4123711340206185,
+      "Recall@0.3": 0.1082474226804124,
+      "Recall@0.5": 0.04639175257731959,
+      "Mean Inference Time": 2.591299260976081,
+      "Errors": 0,
+      "Note": null
+    },
+    {
+      "Run": "lora",
+      "Total Images": 173,
+      "Total Image-Disease Pairs": 194,
+      "Total GT Boxes": 194,
+      "Total Predicted Boxes": 191,
+      "No-Prediction Rate": 0.0154639175257732,
+      "Mean IoU": 0.3119653264893474,
+      "Median IoU": 0.2285533781605172,
+      "Recall@0.1": 0.6134020618556701,
+      "Recall@0.3": 0.4381443298969072,
+      "Recall@0.5": 0.3041237113402062,
+      "Mean Inference Time": 2.728957709310259,
+      "Errors": 0,
+      "Note": null
+    },
+    {
+      "Run": "full_sft",
+      "Total Images": null,
+      "Total Image-Disease Pairs": null,
+      "Total GT Boxes": null,
+      "Total Predicted Boxes": null,
+      "No-Prediction Rate": null,
+      "Mean IoU": null,
+      "Median IoU": null,
+      "Recall@0.1": null,
+      "Recall@0.3": null,
+      "Recall@0.5": null,
+      "Mean Inference Time": null,
+      "Errors": null,
+      "Note": "not_evaluated"
+    },
+    {
+      "Run": "lora_projector",
+      "Total Images": 173,
+      "Total Image-Disease Pairs": 194,
+      "Total GT Boxes": 194,
+      "Total Predicted Boxes": 190,
+      "No-Prediction Rate": 0.02061855670103093,
+      "Mean IoU": 0.3127500738001054,
+      "Median IoU": 0.2218672414601378,
+      "Recall@0.1": 0.6443298969072165,
+      "Recall@0.3": 0.4587628865979381,
+      "Recall@0.5": 0.3041237113402062,
+      "Mean Inference Time": 2.726633238594153,
+      "Errors": 0,
+      "Note": null
+    }
+  ],
+  "projector_load_reports": {
+    "lora_projector": {
+      "projector_path": "results/finetuning/lora_projector_direct_v1/checkpoint-450/mlp1.pt",
+      "n_loaded_tensors": 6,
+      "parameter_names": [
+        "0.bias",
+        "0.weight",
+        "1.bias",
+        "1.weight",
+        "3.bias",
+        "3.weight"
+      ],
+      "fingerprints_before": {
+        "0.weight": {
+          "shape": [
+            4608
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 70.71849060058594,
+          "sum0": 4239.265625,
+          "sha1_prefix": "952e8666bed0"
+        },
+        "0.bias": {
+          "shape": [
+            4608
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 1.0600734949111938,
+          "sum0": 6.161017894744873,
+          "sha1_prefix": "beb20f3fab2d"
+        },
+        "1.weight": {
+          "shape": [
+            2048,
+            4608
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 39.30492401123047,
+          "sum0": 0.5732461214065552,
+          "sha1_prefix": "a2a25a2ee13a"
+        },
+        "1.bias": {
+          "shape": [
+            2048
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 0.40544793009757996,
+          "sum0": 0.9298285245895386,
+          "sha1_prefix": "948f0dc510de"
+        },
+        "3.weight": {
+          "shape": [
+            2048,
+            2048
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 29.89323616027832,
+          "sum0": -0.9310427904129028,
+          "sha1_prefix": "bee2142ad2e7"
+        },
+        "3.bias": {
+          "shape": [
+            2048
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 0.5765326619148254,
+          "sum0": 0.17839378118515015,
+          "sha1_prefix": "892c2c413617"
+        }
+      },
+      "fingerprints_after": {
+        "0.weight": {
+          "shape": [
+            4608
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 70.71849060058594,
+          "sum0": 4239.265625,
+          "sha1_prefix": "952e8666bed0"
+        },
+        "0.bias": {
+          "shape": [
+            4608
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 1.060077428817749,
+          "sum0": 6.161013126373291,
+          "sha1_prefix": "6d4a73c9296a"
+        },
+        "1.weight": {
+          "shape": [
+            2048,
+            4608
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 39.305423736572266,
+          "sum0": 0.5665179491043091,
+          "sha1_prefix": "2663729a6e1e"
+        },
+        "1.bias": {
+          "shape": [
+            2048
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 0.4054345488548279,
+          "sum0": 0.9388771057128906,
+          "sha1_prefix": "c72ff2f80a82"
+        },
+        "3.weight": {
+          "shape": [
+            2048,
+            2048
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 29.89352798461914,
+          "sum0": -0.9413502216339111,
+          "sha1_prefix": "069d5ad2e48e"
+        },
+        "3.bias": {
+          "shape": [
+            2048
+          ],
+          "dtype": "torch.bfloat16",
+          "norm": 0.5765306353569031,
+          "sum0": 0.1790478229522705,
+          "sha1_prefix": "da80a3952e19"
+        }
+      },
+      "n_changed_vs_base": 5,
+      "changed_keys": [
+        "0.bias",
+        "1.bias",
+        "1.weight",
+        "3.bias",
+        "3.weight"
+      ],
+      "unchanged_keys": [
+        "0.weight"
+      ],
+      "mlp1_differs_from_base": true
+    }
+  },
+  "reproducibility": {
+    "model_path": "nvidia/LocateAnything-3B",
+    "model_revision": null,
+    "cwd": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied",
+    "git_commit": "245b2fcb6d655f3c3e7116e34efffcee35e01728",
+    "torch_version": "2.6.0+cu118",
+    "cuda_version": "11.8",
+    "cuda_available": true,
+    "gpu_name": "NVIDIA RTX A4000",
+    "gpu_memory_gb": 15.74,
+    "packages": {
+      "transformers": "4.57.1",
+      "peft": "0.12.0",
+      "accelerate": "1.14.0",
+      "bitsandbytes": "0.49.2",
+      "numpy": "2.2.6",
+      "PIL": "12.2.0",
+      "openpyxl": "3.1.5"
+    }
+  },
+  "merge_note": "Preserved base_zero_shot and lora from loradirect2.xlsx; filled lora_projector from held-out eval on lora_projector_direct_v1/checkpoint-450 (adapter + mlp1.pt); did not rerun zero-shot or LoRA."
+}

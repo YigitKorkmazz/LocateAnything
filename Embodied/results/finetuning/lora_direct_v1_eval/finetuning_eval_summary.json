@@ -1,0 +1,67 @@
+{
+  "timestamp": "2026-07-13T20:56:39.311183+00:00",
+  "split_file": "evaluation/chestxray8/splits/test_pairs_seed42.jsonl",
+  "overall": [
+    {
+      "Run": "base_zero_shot",
+      "Total Images": 173,
+      "Total Image-Disease Pairs": 194,
+      "Total GT Boxes": 194,
+      "Total Predicted Boxes": 241,
+      "No-Prediction Rate": 0.04639175257731959,
+      "Mean IoU": 0.1261865255340169,
+      "Median IoU": 0.06984670781854872,
+      "Recall@0.1": 0.41237113402061853,
+      "Recall@0.3": 0.10824742268041238,
+      "Recall@0.5": 0.04639175257731959,
+      "Mean Inference Time": 2.591299260976081,
+      "Errors": 0
+    },
+    {
+      "Run": "lora",
+      "Total Images": 173,
+      "Total Image-Disease Pairs": 194,
+      "Total GT Boxes": 194,
+      "Total Predicted Boxes": 191,
+      "No-Prediction Rate": 0.015463917525773196,
+      "Mean IoU": 0.31196532648934744,
+      "Median IoU": 0.22855337816051718,
+      "Recall@0.1": 0.6134020618556701,
+      "Recall@0.3": 0.4381443298969072,
+      "Recall@0.5": 0.30412371134020616,
+      "Mean Inference Time": 2.7289577093102593,
+      "Errors": 0
+    },
+    {
+      "Run": "full_sft",
+      "Note": "not_evaluated",
+      "Mean IoU": null
+    },
+    {
+      "Run": "lora_projector",
+      "Note": "not_evaluated",
+      "Mean IoU": null
+    }
+  ],
+  "projector_load_reports": {},
+  "reproducibility": {
+    "model_path": "nvidia/LocateAnything-3B",
+    "model_revision": null,
+    "cwd": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied",
+    "git_commit": "245b2fcb6d655f3c3e7116e34efffcee35e01728",
+    "torch_version": "2.6.0+cu118",
+    "cuda_version": "11.8",
+    "cuda_available": true,
+    "gpu_name": "NVIDIA RTX A4000",
+    "gpu_memory_gb": 15.74,
+    "packages": {
+      "transformers": "4.57.1",
+      "peft": "0.12.0",
+      "accelerate": "1.14.0",
+      "bitsandbytes": "0.49.2",
+      "numpy": "2.2.6",
+      "PIL": "12.2.0",
+      "openpyxl": "3.1.5"
+    }
+  }
+}

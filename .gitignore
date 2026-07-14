@@ -42,5 +42,14 @@ gradio_tmp/*
 
 unit_test*.*
 
+# Accidental empty shell artifacts
+Embodied/PY=
+Embodied/export
+Embodied/mkdir
 
+# Heavy fine-tuning artifacts (adapters / projector weights / logs)
+*.safetensors
+Embodied/results/finetuning/**/mlp1.pt
+Embodied/results/finetuning/**/checkpoint-*/
+Embodied/results/finetuning/**/*.bak_*
 

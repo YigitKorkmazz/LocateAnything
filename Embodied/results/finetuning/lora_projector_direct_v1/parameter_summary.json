@@ -1,0 +1,7 @@
+{
+  "total_parameters": 3532942064,
+  "trainable_parameters": 28611584,
+  "trainable_percent": 0.8098514915244871,
+  "llm_lora_parameters": 14966784,
+  "mlp1_trainable_parameters": 13644800
+}
