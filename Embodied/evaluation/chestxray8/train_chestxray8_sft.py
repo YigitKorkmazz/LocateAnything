@@ -73,6 +73,7 @@ from sft_common import (  # noqa: E402
     read_jsonl,
     refresh_pair_prompt_fields,
     set_global_seed,
+    write_jsonl,
 )
 
 
@@ -1155,6 +1156,8 @@ def save_checkpoint(
     is_lora: bool,
     extra: Optional[Dict[str, Any]] = None,
     save_projector: bool = False,
+    optimizer=None,
+    scheduler=None,
 ) -> Path:
     ckpt_dir = output_dir / f"checkpoint-{step}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -1189,13 +1192,110 @@ def save_checkpoint(
         processor.save_pretrained(str(ckpt_dir))
     except Exception:
         pass
-    meta = {"step": step, "args": args_dict, "save_projector": save_projector}
+
+    trainer_state = {
+        "global_step": int(step),
+        "stage_id": args_dict.get("stage_id"),
+        "output_dir": str(output_dir),
+        "train_pairs_file": args_dict.get("train_pairs_file"),
+    }
+    if optimizer is not None:
+        trainer_state["optimizer"] = optimizer.state_dict()
+    if scheduler is not None:
+        trainer_state["scheduler"] = scheduler.state_dict()
+    torch.save(trainer_state, ckpt_dir / "trainer_state.pt")
+
+    meta = {
+        "step": step,
+        "args": args_dict,
+        "save_projector": save_projector,
+        "stage_id": args_dict.get("stage_id"),
+        "has_trainer_state": True,
+    }
     if extra:
         meta.update(extra)
     (ckpt_dir / "train_state.json").write_text(json.dumps(meta, indent=2) + "\n")
     # Pointer to latest
     (output_dir / "latest_checkpoint.txt").write_text(str(ckpt_dir) + "\n")
     return ckpt_dir
+
+
+def load_lora_adapter_weights(model, adapter_dir: Path) -> None:
+    """Load adapter weights into an already PEFT-wrapped language_model."""
+    from safetensors.torch import load_file
+    from peft.utils.save_and_load import set_peft_model_state_dict
+
+    adapter_dir = Path(adapter_dir)
+    st_path = adapter_dir / "adapter_model.safetensors"
+    bin_path = adapter_dir / "adapter_model.bin"
+    if st_path.is_file():
+        state = load_file(str(st_path))
+    elif bin_path.is_file():
+        state = torch.load(str(bin_path), map_location="cpu")
+    else:
+        raise FileNotFoundError(f"No adapter weights in {adapter_dir}")
+    set_peft_model_state_dict(model.language_model, state)
+
+
+def resume_from_checkpoint(
+    model,
+    optimizer,
+    scheduler,
+    args: argparse.Namespace,
+    device: torch.device,
+    train_projector: bool,
+) -> int:
+    """Restore adapter/mlp1 + optional optimizer/scheduler; return start step."""
+    ckpt = Path(args.resume_from_checkpoint)
+    if not ckpt.exists():
+        raise FileNotFoundError(f"Resume checkpoint not found: {ckpt}")
+
+    # Stage isolation: refuse loading a checkpoint from another stage/output.
+    meta_path = ckpt / "train_state.json"
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text())
+        meta_stage = meta.get("stage_id") or (meta.get("args") or {}).get("stage_id")
+        if args.stage_id and meta_stage and meta_stage != args.stage_id:
+            raise RuntimeError(
+                f"Resume stage mismatch: checkpoint stage_id={meta_stage!r} "
+                f"but current --stage-id={args.stage_id!r}"
+            )
+        meta_out = meta.get("args", {}).get("output_dir")
+        if meta_out and Path(meta_out).resolve() != Path(args.output_dir).resolve():
+            # Soft warning only if stage_id matches/absent.
+            logger.warning(
+                "Resume checkpoint output_dir=%s differs from current output_dir=%s",
+                meta_out,
+                args.output_dir,
+            )
+
+    if (ckpt / "adapter").is_dir():
+        load_lora_adapter_weights(model, ckpt / "adapter")
+        logger.info("Resumed LoRA adapter weights from %s", ckpt / "adapter")
+    if train_projector and (ckpt / "mlp1.pt").is_file():
+        model.mlp1.load_state_dict(torch.load(ckpt / "mlp1.pt", map_location=device))
+        unfreeze_mlp1(model)
+        logger.info("Resumed mlp1 weights from %s", ckpt / "mlp1.pt")
+
+    start_step = 0
+    state_path = ckpt / "trainer_state.pt"
+    if state_path.is_file():
+        state = torch.load(str(state_path), map_location="cpu")
+        start_step = int(state.get("global_step", 0))
+        if optimizer is not None and "optimizer" in state:
+            optimizer.load_state_dict(state["optimizer"])
+            logger.info("Resumed optimizer state (step=%d)", start_step)
+        if scheduler is not None and "scheduler" in state:
+            scheduler.load_state_dict(state["scheduler"])
+            logger.info("Resumed scheduler state")
+    elif meta_path.is_file():
+        start_step = int(json.loads(meta_path.read_text()).get("step", 0))
+        logger.warning(
+            "No trainer_state.pt; using step=%d from train_state.json "
+            "(optimizer/scheduler reset)",
+            start_step,
+        )
+    return start_step
 
 
 @torch.no_grad()
@@ -1544,23 +1644,38 @@ def train_loop(
     processor,
     val_pairs: List[Dict[str, Any]],
     save_projector: bool = False,
+    start_step: int = 0,
 ) -> Dict[str, Any]:
+    from collections import deque
+
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
     history = []
-    global_step = 0
+    global_step = int(start_step)
     best_train_loss_at_save = float("inf")
     final_ckpt = None
     selected_ckpt = None
     selection_criterion = "none"
     accum = max(1, args.gradient_accumulation_steps)
     max_grad_norm = float(getattr(args, "max_grad_norm", DEFAULT_MAX_GRAD_NORM))
+    ma_window = max(1, int(getattr(args, "loss_ma_window", 20)))
+    loss_window: deque = deque(maxlen=ma_window)
+    until_thresh = getattr(args, "until_loss_threshold", None)
+    thresh_patience = max(1, int(getattr(args, "loss_threshold_patience", 20)))
+    below_thresh_streak = 0
+    stopped_by_loss = False
     model.train()
     optimizer.zero_grad(set_to_none=True)
 
-    epochs = args.num_epochs
+    # Step-based training: when --max-steps is set, cycle data until that count
+    # (do not stop early solely because --num-epochs exhausted).
     max_steps = args.max_steps
+    if max_steps is not None:
+        epochs = 10**9
+    else:
+        epochs = args.num_epochs
     start_time = time.time()
+    epoch = 0
 
     for epoch in range(epochs):
         for batch_idx, batch in enumerate(train_loader):
@@ -1608,15 +1723,41 @@ def train_loop(
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
                 loss_f = float(loss.detach().float().cpu())
-                history.append({"step": global_step, "epoch": epoch, "loss": loss_f})
+                loss_window.append(loss_f)
+                loss_ma = float(sum(loss_window) / len(loss_window))
+                history.append(
+                    {
+                        "step": global_step,
+                        "epoch": epoch,
+                        "loss": loss_f,
+                        "loss_ma": loss_ma,
+                    }
+                )
                 if global_step % args.logging_steps == 0:
                     logger.info(
-                        "step=%d epoch=%d loss=%.4f mem=%.1fMB",
+                        "step=%d epoch=%d loss=%.4f loss_ma=%.4f (window=%d) mem=%.1fMB",
                         global_step,
                         epoch,
                         loss_f,
+                        loss_ma,
+                        len(loss_window),
                         gpu_mem_mb()["allocated_mb"],
                     )
+                if until_thresh is not None:
+                    if loss_ma < float(until_thresh):
+                        below_thresh_streak += 1
+                    else:
+                        below_thresh_streak = 0
+                    if below_thresh_streak >= thresh_patience:
+                        stopped_by_loss = True
+                        logger.info(
+                            "Stopping early: loss_ma=%.4f < %.4f for %d consecutive "
+                            "optimizer steps (patience=%d)",
+                            loss_ma,
+                            float(until_thresh),
+                            below_thresh_streak,
+                            thresh_patience,
+                        )
                 if global_step % args.save_steps == 0:
                     ckpt = save_checkpoint(
                         output_dir,
@@ -1626,8 +1767,14 @@ def train_loop(
                         vars(args),
                         global_step,
                         is_lora=is_lora,
-                        extra={"loss": loss_f, "selection_note": "save_step"},
+                        extra={
+                            "loss": loss_f,
+                            "loss_ma": loss_ma,
+                            "selection_note": "save_step",
+                        },
                         save_projector=save_projector,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
                     )
                     # Track lowest train loss among save points only — NOT validation.
                     if loss_f < best_train_loss_at_save:
@@ -1639,8 +1786,12 @@ def train_loop(
                         (output_dir / "lowest_train_loss_checkpoint.txt").write_text(
                             str(ckpt) + "\n"
                         )
+                if stopped_by_loss:
+                    break
 
         if max_steps is not None and global_step >= max_steps:
+            break
+        if stopped_by_loss:
             break
 
     # Final checkpoint
@@ -1652,8 +1803,16 @@ def train_loop(
         vars(args),
         global_step if global_step > 0 else 0,
         is_lora=is_lora,
-        extra={"final": True},
+        extra={
+            "final": True,
+            "stopped_by_loss_threshold": stopped_by_loss,
+            "final_loss_ma": float(sum(loss_window) / len(loss_window))
+            if loss_window
+            else None,
+        },
         save_projector=save_projector,
+        optimizer=optimizer,
+        scheduler=scheduler,
     )
     (output_dir / "loss_history.json").write_text(
         json.dumps(history, indent=2) + "\n"
@@ -1667,9 +1826,13 @@ def train_loop(
             "implemented; labeling final checkpoint only.",
             len(val_pairs),
         )
+    final_loss_ma = (
+        float(sum(loss_window) / len(loss_window)) if loss_window else None
+    )
+    stop_criterion = "loss_threshold" if stopped_by_loss else "end_of_training"
     checkpoint_selection = {
         "label": "final_checkpoint",
-        "criterion": "end_of_training",
+        "criterion": stop_criterion,
         "path": str(final_ckpt),
         "lowest_train_loss_at_save_steps": str(selected_ckpt)
         if selected_ckpt
@@ -1678,6 +1841,9 @@ def train_loop(
         if selected_ckpt
         else None,
         "validation_evaluated": False,
+        "stopped_by_loss_threshold": stopped_by_loss,
+        "final_moving_average_loss": final_loss_ma,
+        "global_step": global_step,
     }
     (output_dir / "checkpoint_selection.json").write_text(
         json.dumps(checkpoint_selection, indent=2) + "\n"
@@ -1692,6 +1858,9 @@ def train_loop(
         "final_checkpoint": str(final_ckpt),
         "checkpoint_selection": checkpoint_selection,
         "elapsed_sec": time.time() - start_time,
+        "global_step": global_step,
+        "final_moving_average_loss": final_loss_ma,
+        "stopped_by_loss_threshold": stopped_by_loss,
         "oom": None,
     }
 
@@ -1730,9 +1899,47 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     p.add_argument("--output-dir", type=str, required=True)
     p.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    p.add_argument(
+        "--train-pairs-file",
+        type=str,
+        default=None,
+        help="Optional JSONL of image-disease pairs used as the exclusive training set "
+        "(memorization / sanity-overfit). When set, default train/val splits are ignored.",
+    )
+    p.add_argument(
+        "--stage-id",
+        type=str,
+        default=None,
+        help="Optional stage tag (e.g. overfit_20) written into checkpoints; "
+        "resume refuses a mismatched stage_id.",
+    )
     # Match the successful lora_direct_v1 / lora_projector_v1 protocol (~450 steps).
     p.add_argument("--num-epochs", type=int, default=5)
-    p.add_argument("--max-steps", type=int, default=None, help="Optional hard stop (debug).")
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Hard stop after this many optimizer steps (preferred for memorization).",
+    )
+    p.add_argument(
+        "--until-loss-threshold",
+        type=float,
+        default=None,
+        help="Optional early stop when moving-average train loss stays below this "
+        "value for --loss-threshold-patience consecutive optimizer steps.",
+    )
+    p.add_argument(
+        "--loss-threshold-patience",
+        type=int,
+        default=20,
+        help="Consecutive optimizer steps with loss_ma below threshold before stop.",
+    )
+    p.add_argument(
+        "--loss-ma-window",
+        type=int,
+        default=20,
+        help="Sliding window size for training-loss moving average.",
+    )
     p.add_argument("--learning-rate", type=float, default=None)
     p.add_argument(
         "--projector-learning-rate",
@@ -1858,12 +2065,32 @@ def main() -> None:
     logger.info("Args: %s", json.dumps(vars(args), indent=2))
 
     split_dir = Path(args.split_dir)
-    train_pairs = read_jsonl(split_dir / f"train_pairs_seed{args.seed}.jsonl")
-    val_pairs = []
-    val_path = split_dir / f"val_pairs_seed{args.seed}.jsonl"
-    if val_path.exists():
-        val_pairs = read_jsonl(val_path)
-    test_pairs = read_jsonl(split_dir / f"test_pairs_seed{args.seed}.jsonl")
+    val_pairs: List[Dict[str, Any]] = []
+    test_pairs: List[Dict[str, Any]] = []
+    if args.train_pairs_file:
+        train_pairs_path = Path(args.train_pairs_file)
+        if not train_pairs_path.is_file():
+            raise FileNotFoundError(f"--train-pairs-file not found: {train_pairs_path}")
+        train_pairs = read_jsonl(train_pairs_path)
+        # Memorization runs: no validation; optional held-out test for reference only.
+        test_path = split_dir / f"test_pairs_seed{args.seed}.jsonl"
+        if test_path.is_file():
+            test_pairs = read_jsonl(test_path)
+        # Persist the exact train manifest used inside the stage output dir.
+        staged = output_dir / "train_pairs_used.jsonl"
+        write_jsonl(staged, train_pairs)
+        logger.info(
+            "Using exclusive train_pairs_file=%s (n=%d); copied to %s",
+            train_pairs_path,
+            len(train_pairs),
+            staged,
+        )
+    else:
+        train_pairs = read_jsonl(split_dir / f"train_pairs_seed{args.seed}.jsonl")
+        val_path = split_dir / f"val_pairs_seed{args.seed}.jsonl"
+        if val_path.exists():
+            val_pairs = read_jsonl(val_path)
+        test_pairs = read_jsonl(split_dir / f"test_pairs_seed{args.seed}.jsonl")
 
     if args.max_train_samples is not None:
         train_pairs = train_pairs[: args.max_train_samples]
@@ -2240,11 +2467,12 @@ def main() -> None:
         logger.info("Debug one-step complete. Report: %s", debug_path)
         return
 
-    # Scheduler
+    # Scheduler (step-based when --max-steps is provided)
     steps_per_epoch = math.ceil(len(loader) / max(1, args.gradient_accumulation_steps))
-    total_steps = steps_per_epoch * args.num_epochs
     if args.max_steps is not None:
-        total_steps = min(total_steps, args.max_steps)
+        total_steps = int(args.max_steps)
+    else:
+        total_steps = steps_per_epoch * args.num_epochs
     warmup_steps = int(total_steps * args.warmup_ratio)
     from transformers import get_cosine_schedule_with_warmup
 
@@ -2252,22 +2480,18 @@ def main() -> None:
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=max(1, total_steps)
     )
 
+    start_step = 0
     if args.resume_from_checkpoint:
-        logger.info("Resume requested from %s (adapter/weights load)", args.resume_from_checkpoint)
-        ckpt = Path(args.resume_from_checkpoint)
-        if uses_lora and (ckpt / "adapter").exists():
-            from peft import PeftModel
-
-            model.language_model = PeftModel.from_pretrained(
-                model.language_model, str(ckpt / "adapter")
-            )
-            if train_projector and (ckpt / "mlp1.pt").is_file():
-                model.mlp1.load_state_dict(
-                    torch.load(ckpt / "mlp1.pt", map_location=device)
-                )
-                unfreeze_mlp1(model)
-        elif (ckpt / "model.safetensors").exists() or (ckpt / "pytorch_model.bin").exists():
-            model = type(model).from_pretrained(str(ckpt), torch_dtype=dtype).to(device)
+        logger.info("Resume requested from %s", args.resume_from_checkpoint)
+        start_step = resume_from_checkpoint(
+            model,
+            optimizer,
+            scheduler,
+            args,
+            device=device,
+            train_projector=train_projector,
+        )
+        logger.info("Resumed global_step=%d; continuing training", start_step)
 
     if args.overfit_samples is not None:
         # Minimal scheduler for short overfit
@@ -2316,6 +2540,7 @@ def main() -> None:
         processor=processor,
         val_pairs=val_pairs,
         save_projector=train_projector,
+        start_step=start_step,
     )
     (output_dir / "train_result.json").write_text(
         json.dumps(result, indent=2, default=str) + "\n"

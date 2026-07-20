@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(CHEST_DIR))
 
 from eval_locateanything_bbox import (  # noqa: E402
+    BOX_RE,
     PROMPT_STRATEGIES,
     build_final_user_query,
     compute_pair_metrics,
@@ -368,6 +369,8 @@ def summarize_rows(sample_rows: List[dict], box_rows: List[dict], run_name: str)
     times = [float(r["Inference Time"]) for r in ok_rows if r.get("Inference Time") is not None]
     all_box_ious = [float(b["IoU"]) for b in box_rows]
     n_no_pred = sum(1 for r in sample_rows if int(r.get("Number of Predicted Boxes") or 0) == 0)
+    n_valid_struct = sum(1 for r in sample_rows if r.get("Valid Structured Output"))
+    n_parsed = sum(1 for r in sample_rows if int(r.get("Number of Predicted Boxes") or 0) > 0)
 
     def overall_recall(thresh: float) -> float:
         if not box_rows:
@@ -380,6 +383,10 @@ def summarize_rows(sample_rows: List[dict], box_rows: List[dict], run_name: str)
         "Total Image-Disease Pairs": len(sample_rows),
         "Total GT Boxes": sum(int(r["Number of GT Boxes"]) for r in sample_rows),
         "Total Predicted Boxes": sum(int(r.get("Number of Predicted Boxes") or 0) for r in sample_rows),
+        "Valid Structured-Output Rate": (
+            n_valid_struct / len(sample_rows) if sample_rows else 0.0
+        ),
+        "Parsed-Box Rate": n_parsed / len(sample_rows) if sample_rows else 0.0,
         "No-Prediction Rate": n_no_pred / len(sample_rows) if sample_rows else 0.0,
         "Mean IoU": float(np.mean(all_box_ious)) if all_box_ious else 0.0,
         "Median IoU": float(np.median(all_box_ious)) if all_box_ious else 0.0,
@@ -404,6 +411,7 @@ def per_disease_rows(sample_rows: List[dict], box_rows: List[dict], run_name: st
         brows = boxes_by_disease.get(disease, [])
         s = summarize_rows(rows, brows, run_name)
         s["Disease"] = disease
+        s["Number of Examples"] = s["Total Image-Disease Pairs"]
         out.append(s)
     return out
 
@@ -452,6 +460,7 @@ def evaluate_split(
             logger.exception("Failed %s %s", image_name, disease)
 
         metrics = compute_pair_metrics(gt_boxes, pred_boxes)
+        valid_structured = bool(BOX_RE.search(raw_answer or ""))
         sample_row = {
             "Run": run_name,
             "Image": image_name,
@@ -461,6 +470,7 @@ def evaluate_split(
             "User Query": final_query,
             "Number of GT Boxes": len(gt_boxes),
             "Number of Predicted Boxes": len(pred_boxes),
+            "Valid Structured Output": valid_structured,
             "Mean Matched IoU": metrics["mean_matched_iou"],
             "Recall@0.1": metrics["recall_0_1"],
             "Recall@0.3": metrics["recall_0_3"],
@@ -569,6 +579,11 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=None, help="Debug: evaluate first N test pairs.")
     parser.add_argument("--skip-base", action="store_true")
+    parser.add_argument(
+        "--omit-missing-run-placeholders",
+        action="store_true",
+        help="Do not insert empty base/full_sft/lora placeholder rows into the Excel.",
+    )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
         "--full-sft-config",
@@ -693,16 +708,17 @@ def main() -> None:
             )
 
     # Ensure placeholder rows exist for missing experiments
-    present = {r["Run"] for r in overall_rows}
-    for required in ("base_zero_shot", "full_sft", "lora", "lora_projector"):
-        if required not in present:
-            overall_rows.append(
-                {
-                    "Run": required,
-                    "Note": "not_evaluated",
-                    "Mean IoU": None,
-                }
-            )
+    if not args.omit_missing_run_placeholders:
+        present = {r["Run"] for r in overall_rows}
+        for required in ("base_zero_shot", "full_sft", "lora", "lora_projector"):
+            if required not in present:
+                overall_rows.append(
+                    {
+                        "Run": required,
+                        "Note": "not_evaluated",
+                        "Mean IoU": None,
+                    }
+                )
 
     excel_path = Path(args.excel_path)
     write_comparison_xlsx(
@@ -720,6 +736,7 @@ def main() -> None:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "split_file": args.split_file,
                 "overall": overall_rows,
+                "disease": disease_rows,
                 "projector_load_reports": projector_load_reports,
                 "reproducibility": collect_reproducibility_info(args.base_model),
             },
