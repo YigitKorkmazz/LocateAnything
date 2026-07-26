@@ -507,11 +507,15 @@ class ChestXray8SFTDataset(Dataset):
         processor,
         tokenizer,
         max_seq_length: int = 4096,
+        training_objective: str = "ntp_only",
+        block_size: int = 6,
     ):
         self.pairs = list(pairs)
         self.processor = processor
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
+        self.training_objective = training_objective
+        self.block_size = int(block_size)
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -521,18 +525,45 @@ class ChestXray8SFTDataset(Dataset):
         messages = messages_from_pair(pair)
         inputs = tokenize_messages(self.processor, messages)
         input_ids = inputs["input_ids"][0]
+        if self.training_objective == "joint_ntp_mtp":
+            from joint_ntp_mtp import pack_joint_ntp_mtp
+
+            packed = pack_joint_ntp_mtp(
+                input_ids,
+                self.tokenizer,
+                block_size=self.block_size,
+                run_integrity_checks=True,
+            )
+            input_ids = packed["input_ids"]
+            labels = packed["labels"]
+            attention_mask = packed["attention_mask"]
+            position_ids = packed["position_ids"]
+            stream_ids = packed["stream_ids"]
+            extra_meta = {
+                "x0_len": packed["x0_len"],
+                "n_mtp_blocks": packed["n_mtp_blocks"],
+                "ntp_token_count": packed["ntp_token_count"],
+                "mtp_token_count": packed["mtp_token_count"],
+            }
+        else:
+            labels = build_assistant_only_labels(input_ids, self.tokenizer)
+            attention_mask = torch.ones_like(input_ids)
+            position_ids = torch.arange(input_ids.numel(), dtype=torch.long)
+            stream_ids = None
+            extra_meta = {}
+
         if input_ids.numel() > self.max_seq_length:
             raise RuntimeError(
                 f"Sequence length {input_ids.numel()} exceeds max_seq_length={self.max_seq_length}"
             )
-        labels = build_assistant_only_labels(input_ids, self.tokenizer)
         pixel_values = inputs["pixel_values"]
         image_grid_hws = inputs["image_grid_hws"]
         image_flags = torch.tensor([len(image_grid_hws)], dtype=torch.long)
-        return {
+        out = {
             "input_ids": input_ids,
             "labels": labels,
-            "attention_mask": torch.ones_like(input_ids),
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
             "pixel_values": pixel_values,
             "image_grid_hws": image_grid_hws,
             "image_flags": image_flags,
@@ -540,28 +571,39 @@ class ChestXray8SFTDataset(Dataset):
                 "image_index": pair["image_index"],
                 "disease": pair["disease"],
                 "patient_id": pair["patient_id"],
+                "training_objective": self.training_objective,
+                **extra_meta,
             },
         }
+        if stream_ids is not None:
+            out["stream_ids"] = stream_ids
+        return out
 
 
 def collate_batch(features: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Batch size is expected to be 1 on A4000; keep logic general for padding."""
     assert len(features) >= 1
+    has_stream = "stream_ids" in features[0]
     if len(features) == 1:
         f = features[0]
-        return {
+        out = {
             "input_ids": f["input_ids"].unsqueeze(0),
             "labels": f["labels"].unsqueeze(0),
             "attention_mask": f["attention_mask"].unsqueeze(0),
+            "position_ids": f["position_ids"].unsqueeze(0),
             "pixel_values": f["pixel_values"],
             "image_grid_hws": f["image_grid_hws"],
             "image_flags": f["image_flags"],
             "meta": [f["meta"]],
         }
+        if has_stream:
+            out["stream_ids"] = f["stream_ids"].unsqueeze(0)
+        return out
 
     max_len = max(f["input_ids"].numel() for f in features)
     pad_id = 0
-    input_ids, labels, attn = [], [], []
+    input_ids, labels, attn, positions = [], [], [], []
+    streams = [] if has_stream else None
     pixel_values, grids, flags, metas = [], [], [], []
     for f in features:
         L = f["input_ids"].numel()
@@ -575,19 +617,31 @@ def collate_batch(features: List[Dict[str, Any]]) -> Dict[str, Any]:
         attn.append(
             torch.nn.functional.pad(f["attention_mask"], (0, pad), value=0)
         )
+        # PE for pads: continue from last position
+        last_pe = int(f["position_ids"][-1].item()) if L > 0 else 0
+        pos_pad = torch.arange(last_pe + 1, last_pe + 1 + pad, dtype=torch.long)
+        positions.append(torch.cat([f["position_ids"], pos_pad], dim=0))
+        if has_stream:
+            streams.append(
+                torch.nn.functional.pad(f["stream_ids"], (0, pad), value=0)
+            )
         pixel_values.append(f["pixel_values"])
         grids.append(torch.as_tensor(f["image_grid_hws"]))
         flags.append(f["image_flags"])
         metas.append(f["meta"])
-    return {
+    out = {
         "input_ids": torch.stack(input_ids),
         "labels": torch.stack(labels),
         "attention_mask": torch.stack(attn),
+        "position_ids": torch.stack(positions),
         "pixel_values": torch.cat(pixel_values, dim=0),
         "image_grid_hws": torch.cat(grids, dim=0),
         "image_flags": torch.cat(flags, dim=0),
         "meta": metas,
     }
+    if has_stream:
+        out["stream_ids"] = torch.stack(streams)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1074,7 +1128,8 @@ def move_batch_to_device(batch: Dict[str, Any], device: torch.device, dtype: tor
 
 
 def forward_loss(model, batch: Dict[str, Any]) -> torch.Tensor:
-    outputs = model(
+    """NTP-only path: standard assistant-masked causal LM CE via ``outputs.loss``."""
+    kwargs = dict(
         pixel_values=batch["pixel_values"],
         input_ids=batch["input_ids"],
         attention_mask=batch["attention_mask"],
@@ -1083,8 +1138,51 @@ def forward_loss(model, batch: Dict[str, Any]) -> torch.Tensor:
         labels=batch["labels"],
         use_cache=False,
     )
+    if batch.get("position_ids") is not None:
+        kwargs["position_ids"] = batch["position_ids"]
+    outputs = model(**kwargs)
     loss = outputs.loss if hasattr(outputs, "loss") else outputs[0]
     return loss
+
+
+def forward_loss_joint(
+    model,
+    batch: Dict[str, Any],
+    lambda_ntp: float = 1.0,
+    lambda_mtp: float = 1.0,
+) -> Dict[str, torch.Tensor]:
+    """Joint NTP+MTP path: explicit L_ntp / L_mtp under native Figure-4 attention.
+
+    Does **not** use ``outputs.loss``. Labels are not passed into the inner LM;
+    we read logits and apply stream-separated CE ourselves.
+    """
+    from joint_ntp_mtp import compute_joint_losses
+
+    if "stream_ids" not in batch:
+        raise RuntimeError("joint_ntp_mtp requires batch['stream_ids']")
+    if batch.get("position_ids") is None:
+        raise RuntimeError("joint_ntp_mtp requires batch['position_ids'] (PE drop)")
+
+    outputs = model(
+        pixel_values=batch["pixel_values"],
+        input_ids=batch["input_ids"],
+        attention_mask=batch["attention_mask"],
+        position_ids=batch["position_ids"],
+        image_grid_hws=batch["image_grid_hws"],
+        image_flags=batch["image_flags"],
+        labels=None,
+        use_cache=False,
+    )
+    if isinstance(outputs, tuple):
+        outputs = outputs[0]
+    logits = outputs.logits
+    return compute_joint_losses(
+        logits,
+        batch["labels"],
+        batch["stream_ids"],
+        lambda_ntp=lambda_ntp,
+        lambda_mtp=lambda_mtp,
+    )
 
 
 def build_optimizer(
@@ -1362,6 +1460,9 @@ def one_training_step(
     optimizer,
     device: torch.device,
     dtype: torch.dtype,
+    training_objective: str = "ntp_only",
+    lambda_ntp: float = 1.0,
+    lambda_mtp: float = 1.0,
 ) -> Dict[str, Any]:
     model.train()
     if torch.cuda.is_available():
@@ -1369,7 +1470,14 @@ def one_training_step(
     batch = move_batch_to_device(batch, device, dtype)
     optimizer.zero_grad(set_to_none=True)
     try:
-        loss = forward_loss(model, batch)
+        loss_components = None
+        if training_objective == "joint_ntp_mtp":
+            loss_components = forward_loss_joint(
+                model, batch, lambda_ntp=lambda_ntp, lambda_mtp=lambda_mtp
+            )
+            loss = loss_components["loss_total"]
+        else:
+            loss = forward_loss(model, batch)
         if not torch.isfinite(loss):
             return {
                 "ok": False,
@@ -1424,14 +1532,19 @@ def one_training_step(
         mlp1_is_trainable = any(
             n.startswith("mlp1") and p.requires_grad for n, p in model.named_parameters()
         )
+        from joint_ntp_mtp import param_grad_norms
+
+        group_norms = param_grad_norms(model)
         optimizer.step()
         peak = gpu_mem_mb()
-        return {
+        result = {
             "ok": True,
             "loss": float(loss.detach().float().cpu()),
             "loss_finite": True,
             "peak_mem": peak,
             "meta": batch.get("meta"),
+            "training_objective": training_objective,
+            "grad_group_norms": group_norms,
             "grad_checks": {
                 "n_lora_tensors_with_grad": len(lora_grad_norms),
                 "n_lora_tensors_with_nonzero_grad": len(nonzero_lora),
@@ -1453,6 +1566,13 @@ def one_training_step(
                 "trainable_without_grad_preview": trainable_without_grad[:20],
             },
         }
+        if loss_components is not None:
+            result["loss_ntp"] = float(loss_components["loss_ntp"].detach().float().cpu())
+            result["loss_mtp"] = float(loss_components["loss_mtp"].detach().float().cpu())
+            result["loss_total"] = float(loss_components["loss_total"].detach().float().cpu())
+            result["n_ntp"] = int(loss_components["n_ntp"].item())
+            result["n_mtp"] = int(loss_components["n_mtp"].item())
+        return result
     except torch.cuda.OutOfMemoryError as e:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -1482,33 +1602,177 @@ def evaluate_overfit_generations(
     device: torch.device,
     dtype: torch.dtype,
 ) -> Dict[str, Any]:
-    """Generate on overfit samples; count valid structured box outputs."""
+    """Generate on overfit samples; score syntax validity and GT box IoU."""
+    from eval_locateanything_bbox import (
+        compute_pair_metrics,
+        convert_boxes_to_pixels,
+        parse_normalized_boxes,
+    )
+    from sft_common import BOX_RE
+
     rows = []
     n_valid = 0
+    all_gt_ious: List[float] = []
+    exact_match_count = 0
+
     for pair in pairs:
         info = run_single_inference_check(
             model, processor, tokenizer, pair, device, dtype
         )
+        raw = info.get("raw_answer") or ""
         valid = bool(info.get("parser_matched_box_syntax")) and int(
             info.get("n_parsed_boxes") or 0
         ) > 0
         if valid:
             n_valid += 1
+
+        gt_px = pair.get("gt_boxes_xyxy_px") or []
+        gt_norm = pair.get("gt_boxes_norm_1000") or []
+        width = int(pair.get("image_width") or 0)
+        height = int(pair.get("image_height") or 0)
+        if (width <= 0 or height <= 0) and pair.get("image_path"):
+            try:
+                with Image.open(pair["image_path"]) as im:
+                    width, height = im.size
+            except Exception:
+                width, height = 0, 0
+
+        pred_norm = parse_normalized_boxes(raw)
+        if width > 0 and height > 0:
+            pred_px = convert_boxes_to_pixels(pred_norm, width, height)
+        else:
+            # Fall back to comparing in normalized space if dims missing.
+            pred_px = [[float(v) for v in b] for b in pred_norm]
+            gt_px = [[float(v) for v in b] for b in gt_norm]
+
+        metrics = compute_pair_metrics(gt_px, pred_px)
+        gt_ious = [float(v) for v in metrics["gt_ious"]]
+        all_gt_ious.extend(gt_ious)
+        best_match_iou = float(metrics["maximum_iou"]) if gt_ious else 0.0
+        recall_at_05 = float(metrics["recall_0_5"])
+        exact = exact_coordinate_match(gt_norm, pred_norm)
+        if exact:
+            exact_match_count += 1
+
         rows.append(
             {
                 "image_index": pair["image_index"],
                 "disease": pair["disease"],
-                "raw": info.get("raw_answer"),
+                "raw": raw,
                 "n_parsed_boxes": info.get("n_parsed_boxes"),
                 "valid": valid,
+                "predicted_boxes": pred_norm,
+                "ground_truth_boxes": gt_norm,
+                "best_match_iou": best_match_iou,
+                "recall_at_05": recall_at_05,
+                "exact_coordinate_match": exact,
+                "mean_matched_iou": float(metrics["mean_matched_iou"]),
+                "gt_ious": gt_ious,
             }
         )
+
+    n = len(pairs)
+    mean_iou = float(sum(all_gt_ious) / len(all_gt_ious)) if all_gt_ious else 0.0
+    recall_at_05 = (
+        float(sum(1 for v in all_gt_ious if v >= 0.5) / len(all_gt_ious))
+        if all_gt_ious
+        else 0.0
+    )
     return {
-        "n": len(pairs),
+        "n": n,
         "n_valid": n_valid,
-        "valid_rate": n_valid / len(pairs) if pairs else 0.0,
+        "valid_rate": n_valid / n if n else 0.0,
+        "mean_iou": mean_iou,
+        "recall_at_05": recall_at_05,
+        "exact_match_count": exact_match_count,
         "samples": rows,
     }
+
+
+def exact_coordinate_match(
+    gt_norm: Sequence[Sequence[float]],
+    pred_norm: Sequence[Sequence[float]],
+    atol: float = 0.5,
+) -> bool:
+    """True iff every GT box has a unique pred with near-exact [0,1000] coords."""
+    if len(gt_norm) == 0:
+        return len(pred_norm) == 0
+    if len(gt_norm) != len(pred_norm):
+        return False
+    used = set()
+    for gt in gt_norm:
+        g = [float(v) for v in gt]
+        found = False
+        for j, pred in enumerate(pred_norm):
+            if j in used:
+                continue
+            p = [float(v) for v in pred]
+            if len(p) != 4 or len(g) != 4:
+                continue
+            if all(abs(a - b) <= atol for a, b in zip(g, p)):
+                used.add(j)
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
+def overfit_should_stop_early(
+    metrics: Dict[str, Any],
+    *,
+    disable_early_stop: bool = False,
+    success_miou: Optional[float] = None,
+    success_recall: Optional[float] = None,
+) -> Tuple[bool, str]:
+    """Decide whether overfit training should stop early.
+
+    Priority:
+      1. ``disable_early_stop`` → never stop early
+      2. metric thresholds (if any provided) → require all provided thresholds
+      3. legacy validity: all samples produce valid structured boxes
+    """
+    if disable_early_stop:
+        return False, "disabled"
+    n = int(metrics.get("n") or 0)
+    n_valid = int(metrics.get("n_valid") or 0)
+    if success_miou is not None or success_recall is not None:
+        ok = True
+        reasons = []
+        if success_miou is not None:
+            miou = float(metrics.get("mean_iou") or 0.0)
+            hit = miou >= float(success_miou)
+            ok = ok and hit
+            reasons.append(f"miou={miou:.4f}>={success_miou}" if hit else f"miou={miou:.4f}<{success_miou}")
+        if success_recall is not None:
+            rec = float(metrics.get("recall_at_05") or 0.0)
+            hit = rec >= float(success_recall)
+            ok = ok and hit
+            reasons.append(
+                f"recall@0.5={rec:.4f}>={success_recall}"
+                if hit
+                else f"recall@0.5={rec:.4f}<{success_recall}"
+            )
+        return ok, "metric:" + ",".join(reasons)
+    if n_valid == n and n > 0:
+        return True, "valid_syntax"
+    return False, "continue"
+
+
+def append_overfit_metrics_jsonl(path: Path, step: int, metrics: Dict[str, Any]) -> None:
+    """Append one evaluation record to overfit_metrics.jsonl."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "step": int(step),
+        "n_valid": int(metrics.get("n_valid") or 0),
+        "n": int(metrics.get("n") or 0),
+        "mean_iou": float(metrics.get("mean_iou") or 0.0),
+        "recall_at_05": float(metrics.get("recall_at_05") or 0.0),
+        "exact_match_count": int(metrics.get("exact_match_count") or 0),
+        "samples": metrics.get("samples") or [],
+    }
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
 def overfit_train_loop(
@@ -1534,29 +1798,74 @@ def overfit_train_loop(
     max_grad_norm = float(getattr(args, "max_grad_norm", DEFAULT_MAX_GRAD_NORM))
     eval_every = max(1, int(args.overfit_eval_every))
     max_steps = args.max_steps if args.max_steps is not None else 80
+    disable_early = bool(getattr(args, "disable_overfit_early_stop", False))
+    success_miou = getattr(args, "overfit_success_miou", None)
+    success_recall = getattr(args, "overfit_success_recall", None)
+    metrics_path = output_dir / "overfit_metrics.jsonl"
+    if metrics_path.exists():
+        metrics_path.unlink()
+
+    def _log_and_maybe_stop(step: int, metrics: Dict[str, Any]) -> bool:
+        gen_history.append({"step": step, **metrics})
+        append_overfit_metrics_jsonl(metrics_path, step, metrics)
+        logger.info(
+            "Overfit @step %d: valid=%d/%d mean_iou=%.4f recall@0.5=%.4f exact=%d/%d",
+            step,
+            metrics["n_valid"],
+            metrics["n"],
+            metrics["mean_iou"],
+            metrics["recall_at_05"],
+            metrics["exact_match_count"],
+            metrics["n"],
+        )
+        for s in metrics["samples"]:
+            logger.info(
+                "  %s valid=%s best_iou=%.4f recall@0.5=%.4f exact=%s: %r",
+                s["image_index"],
+                s["valid"],
+                float(s.get("best_match_iou") or 0.0),
+                float(s.get("recall_at_05") or 0.0),
+                s.get("exact_coordinate_match"),
+                (s.get("raw") or "")[:160],
+            )
+        stop, reason = overfit_should_stop_early(
+            metrics,
+            disable_early_stop=disable_early,
+            success_miou=success_miou,
+            success_recall=success_recall,
+        )
+        if stop:
+            logger.info(
+                "Overfit SUCCESS at step %d (criterion=%s)", step, reason
+            )
+        return stop
 
     # Baseline generations before any updates
     before = evaluate_overfit_generations(
         model, processor, tokenizer, overfit_pairs, device, dtype
     )
-    gen_history.append({"step": 0, **before})
-    logger.info(
-        "Overfit BEFORE: valid=%d/%d", before["n_valid"], before["n"]
-    )
-    for s in before["samples"]:
-        logger.info("  before %s: %r", s["image_index"], (s["raw"] or "")[:160])
+    success = _log_and_maybe_stop(0, before)
+    # Step-0 success is extremely unlikely; still respect disable/thresholds.
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
     start_time = time.time()
-    success = False
 
     while global_step < max_steps and not success:
         for batch_idx, batch in enumerate(train_loader):
             if global_step >= max_steps or success:
                 break
             batch = move_batch_to_device(batch, device, dtype)
-            loss = forward_loss(model, batch)
+            if getattr(args, "training_objective", "ntp_only") == "joint_ntp_mtp":
+                comps = forward_loss_joint(
+                    model,
+                    batch,
+                    lambda_ntp=float(getattr(args, "lambda_ntp", 1.0)),
+                    lambda_mtp=float(getattr(args, "lambda_mtp", 1.0)),
+                )
+                loss = comps["loss_total"]
+            else:
+                loss = forward_loss(model, batch)
             if not torch.isfinite(loss):
                 raise RuntimeError(f"Non-finite loss at overfit step {global_step}: {loss}")
             (loss / accum).backward()
@@ -1572,30 +1881,28 @@ def overfit_train_loop(
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
                 loss_f = float(loss.detach().float().cpu())
-                history.append({"step": global_step, "loss": loss_f})
-                logger.info("overfit step=%d loss=%.4f", global_step, loss_f)
+                row = {"step": global_step, "loss": loss_f}
+                if getattr(args, "training_objective", "ntp_only") == "joint_ntp_mtp":
+                    row["loss_ntp"] = float(comps["loss_ntp"].detach().float().cpu())
+                    row["loss_mtp"] = float(comps["loss_mtp"].detach().float().cpu())
+                history.append(row)
+                if "loss_ntp" in row:
+                    logger.info(
+                        "overfit step=%d loss_total=%.4f loss_ntp=%.4f loss_mtp=%.4f",
+                        global_step,
+                        loss_f,
+                        row["loss_ntp"],
+                        row["loss_mtp"],
+                    )
+                else:
+                    logger.info("overfit step=%d loss=%.4f", global_step, loss_f)
 
                 if global_step % eval_every == 0 or global_step >= max_steps:
                     after = evaluate_overfit_generations(
                         model, processor, tokenizer, overfit_pairs, device, dtype
                     )
-                    gen_history.append({"step": global_step, **after})
-                    logger.info(
-                        "Overfit @step %d: valid=%d/%d",
-                        global_step,
-                        after["n_valid"],
-                        after["n"],
-                    )
-                    for s in after["samples"]:
-                        logger.info(
-                            "  %s valid=%s: %r",
-                            s["image_index"],
-                            s["valid"],
-                            (s["raw"] or "")[:160],
-                        )
-                    if after["n_valid"] == after["n"] and after["n"] > 0:
+                    if _log_and_maybe_stop(global_step, after):
                         success = True
-                        logger.info("Overfit SUCCESS at step %d", global_step)
                         break
 
     ckpt = save_checkpoint(
@@ -1608,6 +1915,8 @@ def overfit_train_loop(
         is_lora=is_lora,
         extra={"overfit": True, "success": success},
         save_projector=save_projector,
+        optimizer=optimizer,
+        scheduler=scheduler,
     )
     report = {
         "success": success,
@@ -1618,6 +1927,10 @@ def overfit_train_loop(
         "elapsed_sec": time.time() - start_time,
         "before": before,
         "after": gen_history[-1] if gen_history else None,
+        "overfit_metrics_path": str(metrics_path),
+        "disable_overfit_early_stop": disable_early,
+        "overfit_success_miou": success_miou,
+        "overfit_success_recall": success_recall,
         "checkpoint_selection": {
             "label": "final_checkpoint",
             "criterion": "overfit_run",
@@ -1683,7 +1996,20 @@ def train_loop(
                 break
             batch = move_batch_to_device(batch, device, dtype)
             try:
-                loss = forward_loss(model, batch)
+                loss_ntp_f = None
+                loss_mtp_f = None
+                if getattr(args, "training_objective", "ntp_only") == "joint_ntp_mtp":
+                    comps = forward_loss_joint(
+                        model,
+                        batch,
+                        lambda_ntp=float(getattr(args, "lambda_ntp", 1.0)),
+                        lambda_mtp=float(getattr(args, "lambda_mtp", 1.0)),
+                    )
+                    loss = comps["loss_total"]
+                    loss_ntp_f = float(comps["loss_ntp"].detach().float().cpu())
+                    loss_mtp_f = float(comps["loss_mtp"].detach().float().cpu())
+                else:
+                    loss = forward_loss(model, batch)
                 if not torch.isfinite(loss):
                     raise RuntimeError(f"Non-finite loss at step {global_step}: {loss}")
                 (loss / accum).backward()
@@ -1725,24 +2051,40 @@ def train_loop(
                 loss_f = float(loss.detach().float().cpu())
                 loss_window.append(loss_f)
                 loss_ma = float(sum(loss_window) / len(loss_window))
-                history.append(
-                    {
-                        "step": global_step,
-                        "epoch": epoch,
-                        "loss": loss_f,
-                        "loss_ma": loss_ma,
-                    }
-                )
+                hist_row = {
+                    "step": global_step,
+                    "epoch": epoch,
+                    "loss": loss_f,
+                    "loss_ma": loss_ma,
+                }
+                if loss_ntp_f is not None:
+                    hist_row["loss_ntp"] = loss_ntp_f
+                    hist_row["loss_mtp"] = loss_mtp_f
+                history.append(hist_row)
                 if global_step % args.logging_steps == 0:
-                    logger.info(
-                        "step=%d epoch=%d loss=%.4f loss_ma=%.4f (window=%d) mem=%.1fMB",
-                        global_step,
-                        epoch,
-                        loss_f,
-                        loss_ma,
-                        len(loss_window),
-                        gpu_mem_mb()["allocated_mb"],
-                    )
+                    if loss_ntp_f is not None:
+                        logger.info(
+                            "step=%d epoch=%d loss_total=%.4f loss_ntp=%.4f "
+                            "loss_mtp=%.4f loss_ma=%.4f (window=%d) mem=%.1fMB",
+                            global_step,
+                            epoch,
+                            loss_f,
+                            loss_ntp_f,
+                            loss_mtp_f,
+                            loss_ma,
+                            len(loss_window),
+                            gpu_mem_mb()["allocated_mb"],
+                        )
+                    else:
+                        logger.info(
+                            "step=%d epoch=%d loss=%.4f loss_ma=%.4f (window=%d) mem=%.1fMB",
+                            global_step,
+                            epoch,
+                            loss_f,
+                            loss_ma,
+                            len(loss_window),
+                            gpu_mem_mb()["allocated_mb"],
+                        )
                 if until_thresh is not None:
                     if loss_ma < float(until_thresh):
                         below_thresh_streak += 1
@@ -1913,6 +2255,38 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Optional stage tag (e.g. overfit_20) written into checkpoints; "
         "resume refuses a mismatched stage_id.",
     )
+    p.add_argument(
+        "--training-objective",
+        type=str,
+        choices=["ntp_only", "joint_ntp_mtp"],
+        default="ntp_only",
+        help="ntp_only: current AR SFT (default). joint_ntp_mtp: paper L_ntp+L_mtp "
+        "with Figure-4 block attention.",
+    )
+    p.add_argument(
+        "--lambda-ntp",
+        type=float,
+        default=1.0,
+        help="Weight for L_ntp when --training-objective joint_ntp_mtp.",
+    )
+    p.add_argument(
+        "--lambda-mtp",
+        type=float,
+        default=1.0,
+        help="Weight for L_mtp when --training-objective joint_ntp_mtp.",
+    )
+    p.add_argument(
+        "--mtp-block-size",
+        type=int,
+        default=6,
+        help="MTP block size L (LocateAnything released default / paper = 6).",
+    )
+    p.add_argument(
+        "--attn-mask-check",
+        action="store_true",
+        help="On joint_ntp_mtp startup, assert Figure-4 attention-mask invariants "
+        "on the first training sample and write a visualization.",
+    )
     # Match the successful lora_direct_v1 / lora_projector_v1 protocol (~450 steps).
     p.add_argument("--num-epochs", type=int, default=5)
     p.add_argument(
@@ -1982,14 +2356,39 @@ def build_argparser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="If set, train only on the first N train pairs and periodically "
-        "evaluate generation on those same N samples until all produce valid "
-        "<box>...</box> outputs (or max-steps is reached).",
+        "evaluate generation on those same N samples. Early-stop defaults to "
+        "all-valid syntax unless --overfit-success-miou/--overfit-success-recall "
+        "are set, or --disable-overfit-early-stop forces --max-steps.",
     )
     p.add_argument(
         "--overfit-eval-every",
         type=int,
         default=5,
         help="Optimizer steps between overfit generation checks.",
+    )
+    p.add_argument(
+        "--disable-overfit-early-stop",
+        action="store_true",
+        default=False,
+        help="If set, never stop overfit early (ignore validity/metric thresholds); "
+        "train until --max-steps. Generation eval still runs every "
+        "--overfit-eval-every steps.",
+    )
+    p.add_argument(
+        "--overfit-success-miou",
+        type=float,
+        default=None,
+        help="Optional early-stop when overfit mean IoU >= this value. "
+        "If set (alone or with --overfit-success-recall), replaces "
+        "validity-only success. Ignored when --disable-overfit-early-stop.",
+    )
+    p.add_argument(
+        "--overfit-success-recall",
+        type=float,
+        default=None,
+        help="Optional early-stop when overfit Recall@0.5 >= this value. "
+        "If set (alone or with --overfit-success-miou), replaces "
+        "validity-only success. Ignored when --disable-overfit-early-stop.",
     )
     p.add_argument(
         "--debug-one-step",
@@ -2279,16 +2678,52 @@ def main() -> None:
     # LoRA-safe vision token injection). Required for both full_sft and lora
     # because HF Qwen2 returns (output, pos_loss_list) while training.
     patch_lora_embedding_inplace_fix(model)
-    # AR SFT must use causal attention (not MTP block masks) so image tokens
-    # receive gradients and mlp1 can train.
-    causal_mask_patch = patch_qwen_force_causal_attn_for_sft(model)
-    logger.info("causal SFT attention mask patch: %s", causal_mask_patch)
+
+    joint_mode = getattr(args, "training_objective", "ntp_only") == "joint_ntp_mtp"
+    logger.info("Training objective: %s", args.training_objective)
+    if joint_mode:
+        # Paper Figure-4 / native MTP block mask — do NOT force plain causal attention.
+        block_size = int(args.mtp_block_size)
+        # Keep LM config aligned with packing.
+        for obj in (
+            getattr(model, "language_model", None),
+            getattr(getattr(model, "language_model", None), "model", None),
+            getattr(getattr(model, "language_model", None), "config", None),
+        ):
+            if obj is None:
+                continue
+            if hasattr(obj, "block_size"):
+                obj.block_size = block_size
+            cfg = getattr(obj, "config", None)
+            if cfg is not None and hasattr(cfg, "block_size"):
+                cfg.block_size = block_size
+            text_cfg = getattr(cfg, "text_config", None) if cfg is not None else None
+            if text_cfg is not None and hasattr(text_cfg, "block_size"):
+                text_cfg.block_size = block_size
+        causal_mask_patch = {
+            "patched": False,
+            "reason": "joint_ntp_mtp uses native create_block_diff_mask_by_pe_4d",
+            "block_size": block_size,
+            "lambda_ntp": float(args.lambda_ntp),
+            "lambda_mtp": float(args.lambda_mtp),
+        }
+        logger.info("joint_ntp_mtp attention: %s", causal_mask_patch)
+    else:
+        # AR SFT must use causal attention (not MTP block masks) so image tokens
+        # receive gradients and mlp1 can train.
+        causal_mask_patch = patch_qwen_force_causal_attn_for_sft(model)
+        logger.info("causal SFT attention mask patch: %s", causal_mask_patch)
 
     # Ensure use_cache disabled
     model.language_model.config.use_cache = False
 
     dataset = ChestXray8SFTDataset(
-        train_pairs, processor, tokenizer, max_seq_length=args.max_seq_length
+        train_pairs,
+        processor,
+        tokenizer,
+        max_seq_length=args.max_seq_length,
+        training_objective=args.training_objective,
+        block_size=int(args.mtp_block_size),
     )
     loader = DataLoader(
         dataset,
@@ -2311,15 +2746,94 @@ def main() -> None:
             json.dumps(group_report, indent=2) + "\n"
         )
 
+    if joint_mode and (args.attn_mask_check or args.debug_one_step):
+        from joint_ntp_mtp import (
+            assert_attention_mask_invariants,
+            describe_packing,
+            pack_joint_ntp_mtp,
+        )
+
+        sample0 = dataset[0]
+        packed_desc = describe_packing(
+            {
+                "input_ids": sample0["input_ids"],
+                "labels": sample0["labels"],
+                "position_ids": sample0["position_ids"],
+                "stream_ids": sample0["stream_ids"],
+                "x0_len": sample0["meta"]["x0_len"],
+                "n_mtp_blocks": sample0["meta"]["n_mtp_blocks"],
+                "block_size": args.mtp_block_size,
+                "ntp_token_count": sample0["meta"]["ntp_token_count"],
+                "mtp_token_count": sample0["meta"]["mtp_token_count"],
+                "block_meta": [],
+            },
+            tokenizer,
+        )
+        # Re-pack once to get block_meta for the dump.
+        base_ids = tokenize_messages(
+            processor, messages_from_pair(train_pairs[0])
+        )["input_ids"][0]
+        packed_full = pack_joint_ntp_mtp(
+            base_ids, tokenizer, block_size=int(args.mtp_block_size)
+        )
+        packed_desc = describe_packing(packed_full, tokenizer)
+        (output_dir / "joint_packing_dump.txt").write_text(packed_desc + "\n")
+        mask_report = assert_attention_mask_invariants(
+            packed_full["position_ids"],
+            block_size=int(args.mtp_block_size),
+            x0_len=int(packed_full["x0_len"]),
+        )
+        (output_dir / "attn_mask_check.json").write_text(
+            json.dumps(mask_report, indent=2) + "\n"
+        )
+        # Save a small attention-mask visualization (NTP isolation strip).
+        try:
+            from joint_ntp_mtp import build_figure4_attention_mask
+            import numpy as np
+
+            m = build_figure4_attention_mask(
+                packed_full["position_ids"], block_size=int(args.mtp_block_size)
+            )[0, 0]
+            allowed = (m == 0).cpu().numpy().astype(np.uint8) * 255
+            # Downsample if huge
+            S = allowed.shape[0]
+            if S > 512:
+                step = max(1, S // 512)
+                allowed = allowed[::step, ::step]
+            from PIL import Image
+
+            Image.fromarray(allowed, mode="L").save(
+                output_dir / "attn_mask_visualization.png"
+            )
+            logger.info(
+                "Wrote attn mask visualization (%dx%d) and packing dump",
+                allowed.shape[0],
+                allowed.shape[1],
+            )
+        except Exception as e:
+            logger.warning("Could not write attn mask visualization: %s", e)
+        logger.info("Attention mask invariants OK: %s", mask_report)
+
     # Debug one-step mode
     if args.debug_one_step:
         batch = next(iter(loader))
-        result = one_training_step(model, batch, optimizer, device, dtype)
+        result = one_training_step(
+            model,
+            batch,
+            optimizer,
+            device,
+            dtype,
+            training_objective=args.training_objective,
+            lambda_ntp=float(args.lambda_ntp),
+            lambda_mtp=float(args.lambda_mtp),
+        )
         debug_report = {
             "experiment_type": args.experiment_type,
+            "training_objective": args.training_objective,
             "model_revision": resolved_revision,
             "hf_home": os.environ.get("HF_HOME"),
             "pos_loss_list_patch": pos_loss_patch,
+            "causal_mask_patch": causal_mask_patch,
             "mem_before_load": mem_before,
             "mem_after_load": mem_after_load,
             "parameter_summary": param_report,

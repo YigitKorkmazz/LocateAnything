@@ -75,8 +75,11 @@ def _eval_summary(eval_dir: Path) -> Optional[Dict[str, Any]]:
 def build_workbook(
     results_dir: Path,
     out_xlsx: Path,
+    overfit20_eval_dir: Optional[Path] = None,
+    integrity_report: Optional[Path] = None,
 ) -> None:
-    integrity = _load_json(results_dir / "split_integrity_report.json") or {}
+    integrity_path = integrity_report or (results_dir / "split_integrity_report.json")
+    integrity = _load_json(integrity_path) or {}
 
     # Expected layout after manual runs:
     #   overfit_20/                 training run
@@ -88,7 +91,8 @@ def build_workbook(
     experiments = {
         "train_20_eval_20": {
             "train_dir": results_dir / "overfit_20",
-            "eval_dir": results_dir / "overfit_20" / "eval_on_20",
+            "eval_dir": overfit20_eval_dir
+            or (results_dir / "overfit_20" / "eval_on_20"),
             "train_size_label": "20%",
             "eval_size_label": "20%",
         },
@@ -279,8 +283,29 @@ def main() -> None:
         type=str,
         default=str(DEFAULT_RESULTS / "chestxray8_overfit_capacity_comparison.xlsx"),
     )
+    p.add_argument(
+        "--overfit-20-eval-dir",
+        type=str,
+        default=None,
+        help="Optional override for the train-20/eval-20 evaluation directory.",
+    )
+    p.add_argument(
+        "--split-integrity-report",
+        type=str,
+        default=None,
+        help="Optional split_integrity_report.json path.",
+    )
     args = p.parse_args()
-    build_workbook(Path(args.results_dir), Path(args.output_xlsx))
+    build_workbook(
+        Path(args.results_dir),
+        Path(args.output_xlsx),
+        overfit20_eval_dir=Path(args.overfit_20_eval_dir)
+        if args.overfit_20_eval_dir
+        else None,
+        integrity_report=Path(args.split_integrity_report)
+        if args.split_integrity_report
+        else None,
+    )
 
 
 if __name__ == "__main__":
