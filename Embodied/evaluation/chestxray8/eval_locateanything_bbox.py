@@ -771,6 +771,7 @@ def run_inference(
     phrase: str,
     prompt_strategy: str = "bare_label",
     final_query: Optional[str] = None,
+    generation_mode: str = "hybrid",
 ) -> Tuple[str, float]:
     """Run LocateAnything inference for one image.
 
@@ -783,9 +784,13 @@ def run_inference(
     with torch.inference_mode():
         if prompt_strategy == "direct_disease":
             query = final_query or phrase
-            result = worker.predict(image, query, generation_mode="hybrid", verbose=False)
+            result = worker.predict(
+                image, query, generation_mode=generation_mode, verbose=False
+            )
         else:
-            result = worker.ground_multi(image, phrase, generation_mode="hybrid", verbose=False)
+            result = worker.ground_multi(
+                image, phrase, generation_mode=generation_mode, verbose=False
+            )
     elapsed = time.perf_counter() - t0
     answer = result.get("answer", "")
     if isinstance(answer, tuple):

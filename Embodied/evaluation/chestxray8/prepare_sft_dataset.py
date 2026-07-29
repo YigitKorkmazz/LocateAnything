@@ -17,6 +17,7 @@ Writes:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
@@ -231,6 +232,70 @@ def assert_no_leakage(
     return report
 
 
+def write_validated_train80_manifest(
+    train_pairs: Sequence[Dict[str, Any]],
+    val_pairs: Sequence[Dict[str, Any]],
+    test_pairs: Sequence[Dict[str, Any]],
+    output_path: Path,
+    *,
+    seed: int,
+) -> Dict[str, Any]:
+    """Write the deterministic train+validation union after strict validation."""
+    train80 = sorted(
+        [*train_pairs, *val_pairs],
+        key=lambda row: (row["image_index"], row["disease"]),
+    )
+    pair_keys = [(row["image_index"], row["disease"]) for row in train80]
+    if len(pair_keys) != len(set(pair_keys)):
+        raise RuntimeError("Duplicate image-disease pairs in train80 union")
+
+    train_patients = {str(row["patient_id"]) for row in train80}
+    test_patients = {str(row["patient_id"]) for row in test_pairs}
+    train_images = {row["image_index"] for row in train80}
+    test_images = {row["image_index"] for row in test_pairs}
+    patient_overlap = sorted(train_patients & test_patients)
+    image_overlap = sorted(train_images & test_images)
+    if patient_overlap or image_overlap:
+        raise RuntimeError(
+            "Train80/test leakage detected: "
+            f"patients={patient_overlap}, images={image_overlap}"
+        )
+
+    payload = "".join(
+        json.dumps(row, ensure_ascii=False) + "\n" for row in train80
+    ).encode("utf-8")
+    sha256 = hashlib.sha256(payload).hexdigest()
+    report = {
+        "seed": int(seed),
+        "n_pairs": len(train80),
+        "n_patients": len(train_patients),
+        "n_images": len(train_images),
+        "n_duplicate_pairs": len(pair_keys) - len(set(pair_keys)),
+        "train_test_patient_overlap": patient_overlap,
+        "train_test_image_overlap": image_overlap,
+        "sha256": sha256,
+        "path": str(output_path),
+    }
+    if int(seed) == 42:
+        expected = {
+            "n_pairs": 790,
+            "n_patients": 581,
+            "n_images": 707,
+            "sha256": "a2b1c25f652f90e8d93e58b33ee74aa5eb09db4df7c6b37e760f5e5238c2e3b0",
+        }
+        mismatches = {
+            key: {"expected": value, "actual": report[key]}
+            for key, value in expected.items()
+            if report[key] != value
+        }
+        if mismatches:
+            raise RuntimeError(f"Seed-42 train80 integrity mismatch: {mismatches}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(payload)
+    return report
+
+
 def pairs_to_sharegpt(pairs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [
         build_sharegpt_sample(
@@ -321,6 +386,7 @@ def main() -> None:
     train_split_path = split_dir / f"train_pairs_seed{args.seed}.jsonl"
     test_split_path = split_dir / f"test_pairs_seed{args.seed}.jsonl"
     val_split_path = split_dir / f"val_pairs_seed{args.seed}.jsonl"
+    train80_split_path = split_dir / f"train80_pairs_seed{args.seed}.jsonl"
     summary_path = split_dir / f"split_summary_seed{args.seed}.json"
 
     if train_split_path.exists() and test_split_path.exists() and not args.overwrite:
@@ -361,6 +427,14 @@ def main() -> None:
         raise RuntimeError(f"Train/test leakage detected: {leakage}")
     if val_pairs and not leakage.get("val_leakage_free", True):
         raise RuntimeError(f"Validation leakage detected: {leakage}")
+    train80_report = write_validated_train80_manifest(
+        train_pairs,
+        val_pairs,
+        test_pairs,
+        train80_split_path,
+        seed=args.seed,
+    )
+    logger.info("Wrote validated train80 manifest: %s", train80_report)
 
     # ShareGPT + recipes (always refresh from split files so formats stay in sync)
     train_sharegpt = data_dir / f"train_sharegpt_seed{args.seed}.jsonl"
@@ -389,15 +463,19 @@ def main() -> None:
         "class_distribution_train": class_distribution(train_pairs),
         "class_distribution_val": class_distribution(val_pairs),
         "class_distribution_test": class_distribution(test_pairs),
+        "train80_manifest": train80_report,
         "leakage_check": leakage,
         "paths": {
             "train_pairs": str(train_split_path),
             "val_pairs": str(val_split_path),
             "test_pairs": str(test_split_path),
+            "train80_pairs": str(train80_split_path),
             "train_sharegpt": str(train_sharegpt),
             "val_sharegpt": str(val_sharegpt),
             "test_sharegpt": str(test_sharegpt),
         },
+        "user_query_example": "Locate the Atelectasis in this chest X-ray",
+        "assistant_target_example": "<ref>Atelectasis</ref><box>...",
     }
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 

@@ -23,6 +23,7 @@ Default LRs (shown explicitly; override via CLI):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -1313,6 +1314,28 @@ def save_checkpoint(
     if extra:
         meta.update(extra)
     (ckpt_dir / "train_state.json").write_text(json.dumps(meta, indent=2) + "\n")
+    checkpoint_hashes: Dict[str, str] = {}
+    for artifact in (
+        ckpt_dir / "adapter" / "adapter_model.safetensors",
+        ckpt_dir / "adapter" / "adapter_model.bin",
+        ckpt_dir / "adapter_state.pt",
+        ckpt_dir / "mlp1.pt",
+    ):
+        if artifact.is_file():
+            checkpoint_hashes[str(artifact.relative_to(ckpt_dir))] = _sha256_file(
+                artifact
+            )
+    (ckpt_dir / "checkpoint_hashes.json").write_text(
+        json.dumps(
+            {
+                "checkpoint": str(ckpt_dir),
+                "step": int(step),
+                "sha256": checkpoint_hashes,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
     # Pointer to latest
     (output_dir / "latest_checkpoint.txt").write_text(str(ckpt_dir) + "\n")
     return ckpt_dir
@@ -1945,6 +1968,54 @@ def overfit_train_loop(
     return report
 
 
+def accumulation_group_size(
+    batch_idx: int, num_batches: int, accumulation_steps: int
+) -> int:
+    """Return the microbatch count to step now, or zero when still accumulating."""
+    accum = max(1, int(accumulation_steps))
+    completed = int(batch_idx) + 1
+    if completed % accum == 0:
+        return accum
+    if completed == int(num_batches):
+        return completed % accum
+    return 0
+
+
+def finish_gradient_accumulation(
+    model,
+    optimizer,
+    scheduler,
+    *,
+    accumulation_steps: int,
+    group_size: int,
+    max_grad_norm: float,
+) -> None:
+    """Clip/step/clear one full or final partial accumulation group.
+
+    Every microbatch loss is divided by ``accumulation_steps`` before backward.
+    A partial group therefore needs ``accumulation_steps / group_size`` gradient
+    rescaling to remain the mean loss over the samples actually accumulated.
+    """
+    accum = max(1, int(accumulation_steps))
+    group = int(group_size)
+    if group <= 0 or group > accum:
+        raise ValueError(f"Invalid accumulation group size {group} for accum={accum}")
+    if group != accum:
+        scale = float(accum) / float(group)
+        for parameter in model.parameters():
+            if parameter.requires_grad and parameter.grad is not None:
+                parameter.grad.mul_(scale)
+    if max_grad_norm and max_grad_norm > 0:
+        torch.nn.utils.clip_grad_norm_(
+            [p for p in model.parameters() if p.requires_grad],
+            max_grad_norm,
+        )
+    optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
+    optimizer.zero_grad(set_to_none=True)
+
+
 def train_loop(
     model,
     train_loader: DataLoader,
@@ -2037,16 +2108,18 @@ def train_loop(
                     },
                 }
 
-            if (batch_idx + 1) % accum == 0:
-                if max_grad_norm and max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for p in model.parameters() if p.requires_grad],
-                        max_grad_norm,
-                    )
-                optimizer.step()
-                if scheduler is not None:
-                    scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
+            group_size = accumulation_group_size(
+                batch_idx, len(train_loader), accum
+            )
+            if group_size:
+                finish_gradient_accumulation(
+                    model,
+                    optimizer,
+                    scheduler,
+                    accumulation_steps=accum,
+                    group_size=group_size,
+                    max_grad_norm=max_grad_norm,
+                )
                 global_step += 1
                 loss_f = float(loss.detach().float().cpu())
                 loss_window.append(loss_f)
@@ -2423,6 +2496,28 @@ def setup_logging(output_dir: Path) -> None:
     logger.addHandler(sh)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _assert_output_dir_available(
+    output_dir: Path, resume_from_checkpoint: Optional[str]
+) -> None:
+    if (
+        output_dir.exists()
+        and any(output_dir.iterdir())
+        and not resume_from_checkpoint
+    ):
+        raise FileExistsError(
+            f"Refusing occupied output directory without --resume-from-checkpoint: "
+            f"{output_dir}"
+        )
+
+
 def main() -> None:
     args = build_argparser().parse_args()
     if args.no_8bit_adam:
@@ -2438,6 +2533,7 @@ def main() -> None:
         args.projector_learning_rate = DEFAULT_PROJECTOR_LR
 
     output_dir = Path(args.output_dir)
+    _assert_output_dir_available(output_dir, args.resume_from_checkpoint)
     setup_logging(output_dir)
     set_global_seed(args.seed)
 
@@ -2485,7 +2581,8 @@ def main() -> None:
             staged,
         )
     else:
-        train_pairs = read_jsonl(split_dir / f"train_pairs_seed{args.seed}.jsonl")
+        train_pairs_path = split_dir / f"train_pairs_seed{args.seed}.jsonl"
+        train_pairs = read_jsonl(train_pairs_path)
         val_path = split_dir / f"val_pairs_seed{args.seed}.jsonl"
         if val_path.exists():
             val_pairs = read_jsonl(val_path)
@@ -2523,6 +2620,11 @@ def main() -> None:
     repro["n_train"] = len(train_pairs)
     repro["n_val"] = len(val_pairs)
     repro["n_test"] = len(test_pairs)
+    repro["train_split_file"] = str(train_pairs_path)
+    repro["train_split_sha256"] = _sha256_file(train_pairs_path)
+    staged_manifest = output_dir / "train_pairs_used.jsonl"
+    if staged_manifest.is_file():
+        repro["train_pairs_used_sha256"] = _sha256_file(staged_manifest)
     (output_dir / "reproducibility.json").write_text(json.dumps(repro, indent=2) + "\n")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -51,6 +51,21 @@ from sft_common import (  # noqa: E402
 PINNED_MODEL_REVISION = "c32291ca5e996f5a7a485845b4f57a233936bba0"
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def assert_eval_outputs_available(output_dir: Path, excel_path: Path) -> None:
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"Refusing occupied evaluation output directory: {output_dir}")
+    if excel_path.exists():
+        raise FileExistsError(f"Refusing to overwrite existing Excel output: {excel_path}")
+
+
 def setup_logger(output_dir: Path) -> logging.Logger:
     output_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("finetune_eval")
@@ -387,7 +402,9 @@ def summarize_rows(sample_rows: List[dict], box_rows: List[dict], run_name: str)
             n_valid_struct / len(sample_rows) if sample_rows else 0.0
         ),
         "Parsed-Box Rate": n_parsed / len(sample_rows) if sample_rows else 0.0,
+        "Parse-Failure Count": len(sample_rows) - n_parsed,
         "No-Prediction Rate": n_no_pred / len(sample_rows) if sample_rows else 0.0,
+        "No-Prediction Count": n_no_pred,
         "Mean IoU": float(np.mean(all_box_ious)) if all_box_ious else 0.0,
         "Median IoU": float(np.median(all_box_ious)) if all_box_ious else 0.0,
         "Recall@0.1": overall_recall(0.1),
@@ -422,6 +439,7 @@ def evaluate_split(
     run_name: str,
     prompt_strategy: str,
     logger: logging.Logger,
+    generation_mode: str = "hybrid",
     limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     if limit is not None:
@@ -451,6 +469,7 @@ def evaluate_split(
                 phrase,
                 prompt_strategy=prompt_strategy,
                 final_query=final_query,
+                generation_mode=generation_mode,
             )
             norm = parse_normalized_boxes(raw_answer)
             pred_boxes = convert_boxes_to_pixels(norm, width, height)
@@ -586,6 +605,12 @@ def main() -> None:
     )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
+        "--generation-mode",
+        choices=("hybrid", "slow"),
+        default="hybrid",
+        help="LocateAnything decoding mode (default: hybrid; slow: strict NTP AR).",
+    )
+    parser.add_argument(
         "--full-sft-config",
         type=str,
         default=None,
@@ -601,10 +626,14 @@ def main() -> None:
     set_global_seed(args.seed)
 
     output_dir = Path(args.output_dir)
+    excel_path = Path(args.excel_path)
+    assert_eval_outputs_available(output_dir, excel_path)
     logger = setup_logger(output_dir)
-    pairs = read_jsonl(Path(args.split_file))
+    split_path = Path(args.split_file)
+    pairs = read_jsonl(split_path)
     logger.info("Loaded %d held-out test pairs from %s", len(pairs), args.split_file)
     logger.info("Model revision pin: %s", args.model_revision)
+    logger.info("Generation mode: %s", args.generation_mode)
     if args.prompt_strategy not in PROMPT_STRATEGIES:
         raise ValueError(args.prompt_strategy)
 
@@ -622,6 +651,34 @@ def main() -> None:
         runs.append(("lora", args.lora_checkpoint))
     if not runs:
         raise RuntimeError("No runs specified")
+
+    artifact_hashes: Dict[str, str] = {
+        "split_file": sha256_file(split_path),
+    }
+    if args.lora_checkpoint:
+        adapter_dir = resolve_adapter_dir(Path(args.lora_checkpoint))
+        for name in ("adapter_model.safetensors", "adapter_model.bin"):
+            adapter_weights = adapter_dir / name
+            if adapter_weights.is_file():
+                artifact_hashes["lora_adapter"] = sha256_file(adapter_weights)
+                break
+    if args.projector_checkpoint:
+        artifact_hashes["mlp1"] = sha256_file(Path(args.projector_checkpoint))
+    provenance = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "split_file": str(split_path),
+        "model_revision": args.model_revision,
+        "generation_mode": args.generation_mode,
+        "lora_checkpoint": args.lora_checkpoint,
+        "projector_checkpoint": args.projector_checkpoint,
+        "sha256": artifact_hashes,
+        "reproducibility": collect_reproducibility_info(
+            args.base_model, args.model_revision
+        ),
+    }
+    (output_dir / "eval_provenance.json").write_text(
+        json.dumps(provenance, indent=2, default=str) + "\n"
+    )
 
     overall_rows: List[dict] = []
     disease_rows: List[dict] = []
@@ -644,6 +701,7 @@ def main() -> None:
         if label == "lora_projector" and args.projector_checkpoint:
             row["projector_checkpoint"] = args.projector_checkpoint
             row["lora_checkpoint"] = args.lora_checkpoint
+        row["generation_mode"] = args.generation_mode
         training_config_rows.append(row)
 
     for run_name, model_path in runs:
@@ -669,6 +727,7 @@ def main() -> None:
             run_name=run_name,
             prompt_strategy=args.prompt_strategy,
             logger=logger,
+            generation_mode=args.generation_mode,
             limit=args.limit,
         )
         overall_rows.append(result["overall"])
@@ -720,7 +779,6 @@ def main() -> None:
                     }
                 )
 
-    excel_path = Path(args.excel_path)
     write_comparison_xlsx(
         excel_path,
         overall_rows,
@@ -735,10 +793,14 @@ def main() -> None:
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "split_file": args.split_file,
+                "generation_mode": args.generation_mode,
+                "sha256": artifact_hashes,
                 "overall": overall_rows,
                 "disease": disease_rows,
                 "projector_load_reports": projector_load_reports,
-                "reproducibility": collect_reproducibility_info(args.base_model),
+                "reproducibility": collect_reproducibility_info(
+                    args.base_model, args.model_revision
+                ),
             },
             indent=2,
             default=str,

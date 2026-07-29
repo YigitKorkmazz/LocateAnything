@@ -42,6 +42,17 @@
     "Pneumonia": 28,
     "Pneumothorax": 19
   },
+  "train80_manifest": {
+    "seed": 42,
+    "n_pairs": 790,
+    "n_patients": 581,
+    "n_images": 707,
+    "n_duplicate_pairs": 0,
+    "train_test_patient_overlap": [],
+    "train_test_image_overlap": [],
+    "sha256": "a2b1c25f652f90e8d93e58b33ee74aa5eb09db4df7c6b37e760f5e5238c2e3b0",
+    "path": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/train80_pairs_seed42.jsonl"
+  },
   "leakage_check": {
     "train_test_image_overlap": [],
     "train_test_patient_overlap": [],
@@ -56,6 +67,7 @@
     "train_pairs": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/train_pairs_seed42.jsonl",
     "val_pairs": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/val_pairs_seed42.jsonl",
     "test_pairs": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/test_pairs_seed42.jsonl",
+    "train80_pairs": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/train80_pairs_seed42.jsonl",
     "train_sharegpt": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/data/train_sharegpt_seed42.jsonl",
     "val_sharegpt": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/data/val_sharegpt_seed42.jsonl",
     "test_sharegpt": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/data/test_sharegpt_seed42.jsonl"
