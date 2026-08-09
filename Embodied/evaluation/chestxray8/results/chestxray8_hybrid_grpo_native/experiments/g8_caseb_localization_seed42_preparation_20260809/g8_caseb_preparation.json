@@ -1,0 +1,77 @@
+{
+  "format": "chestxray8_g8_caseb_localization_preparation_v1",
+  "safe_verdict": "safe_to_start_bounded_0_to_150",
+  "safe_to_assume_benefit_to_500": false,
+  "full_150_run_started": false,
+  "heldout_test_evaluated": false,
+  "probe": {
+    "optimizer_updates": 1,
+    "group_size": 8,
+    "status": "passed",
+    "oom": false,
+    "trainable_tensor_count": 510,
+    "all_trainable_gradients_present": true,
+    "all_trainable_gradients_finite": true,
+    "lora_gradient_tensor_count": 504,
+    "projector_gradient_tensor_count": 6,
+    "nonzero_lora_gradient_tensors": 252,
+    "nonzero_projector_gradient_tensors": 6,
+    "lora_gradient_norm": 13.40234812085601,
+    "projector_gradient_norm": 38.82039446158997,
+    "global_gradient_norm_before_clip": 41.06879566069918,
+    "global_gradient_norm_after_clip": 0.999968593446953,
+    "adamw_state_finite": true,
+    "checkpoint": "one_update_probe/two_gpu_g8_caseb_step_001.pt",
+    "checkpoint_sha256": "823d1c93ec400fd6751020605b8226d8187be4655338b86bfbf67bbbd3980d73",
+    "checkpoint_reload": {
+      "status": "passed",
+      "trainable_state_exact": true,
+      "optimizer_state_exact": true,
+      "optimizer_state_finite": true,
+      "artifact": "step001_reload_validation_v2/two_gpu_g8_caseb_summary.json"
+    },
+    "memory_mib": {
+      "cuda:0": {"peak_allocated": 11434.37939453125, "peak_reserved": 12772.0, "capacity": 24124.1875, "reserved_headroom": 11352.1875},
+      "cuda:1": {"peak_allocated": 10513.22509765625, "peak_reserved": 11842.0, "capacity": 24124.1875, "reserved_headroom": 12282.1875}
+    }
+  },
+  "objective_equivalence": {
+    "g4_and_g8_same_mean_reduction": true,
+    "accumulation": "sum_i loss_i / GROUP_SIZE",
+    "advantages": "within-group population-standardized",
+    "fixed_divide_by_four_in_objective": false,
+    "hidden_batch_or_normalization_multiplier": false
+  },
+  "saved_g4_diversity": {
+    "source_groups": 578,
+    "source_trajectories": 2312,
+    "exact_duplicate_box_pair_rate_among_valid": 0.25888787602552416,
+    "mean_pairwise_coordinate_l1_per_coordinate_norm01": 0.015227438468550594,
+    "mean_pairwise_box_iou": 0.9444032783680465,
+    "exact_duplicate_token_sequence_pair_rate": 0.20818915801614762,
+    "mean_unique_token_sequences_per_group": 3.1972318339100347,
+    "best_iou_bins": {
+      "0-.1": {"count": 397, "fraction": 0.6868512110726643},
+      ".1-.25": {"count": 150, "fraction": 0.25951557093425603},
+      ".25-.4": {"count": 23, "fraction": 0.039792387543252594},
+      ".4-.5": {"count": 7, "fraction": 0.012110726643598616},
+      ">.5": {"count": 1, "fraction": 0.0017301038062283738}
+    },
+    "g8_mixed_group_estimate": {
+      "pooled_iid_probability": 0.013757308570823024,
+      "pooled_iid_expected_per_150": 2.0635962856234533,
+      "heterogeneity_aware_probability": 0.0034542210940960954,
+      "heterogeneity_aware_expected_per_150": 0.5181331641144143,
+      "diagnosis": "unlikely_to_materially_increase"
+    }
+  },
+  "validation": {
+    "manifest_count": 80,
+    "manifest_sha256": "f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838",
+    "steps": [25, 50, 75, 100, 125, 150],
+    "metrics": ["mean_iou", "median_iou", "iou_gt_0_5", "valid_native_box_rate", "near_full_image_box_rate", "mean_box_area", "semantic_score", "branch_distribution"],
+    "step100_rule_is_report_only": true,
+    "heldout_test_used_for_selection": false
+  },
+  "commands": "G8_CASEB_COMMANDS.md"
+}

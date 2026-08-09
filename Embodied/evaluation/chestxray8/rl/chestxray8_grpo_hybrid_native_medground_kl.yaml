@@ -1,0 +1,213 @@
+# MedGround-R1-compatible KL GRPO with native LocateAnything format reward and
+# Hybrid-aware stochastic decoding (PBD accept / NTP fallback).
+# Shares spatial + semantic reward definitions with
+# chestxray8_grpo_pbd_native.yaml. Only the final-box extraction adapter
+# (committed Hybrid action) differs.
+experiment: chestxray8_medground_kl_grpo_native_hybrid_full_trajectory
+hardware:
+  required_gpu_name_substring: RTX 3090
+  visible_device_count: 2
+  decoder_shard_layers: [18, 18]
+medground_source_audit:
+  repository_commit: 37b210dd7d6ee71179b3013d7f8042af1de0d5d3
+  trainer_upstream_era_commit: ebc741f160b9d0c2312cd627516bf6c0ecd73343
+  launch_explicit_beta: null
+  dependency_specification: "trl @ git+https://github.com/huggingface/trl.git@main"
+  upstream_era_trl_beta_default: 0.04
+  selected_explicit_beta: 0.04
+  reproducibility_note: >-
+    The published launch omits beta and setup.py does not pin TRL. The
+    vendored trainer derives from the February-2025 upstream implementation,
+    whose directly audited GRPOConfig default is 0.04; this experiment makes
+    that inherited value explicit so later TRL default changes cannot alter it.
+prompt:
+  name: native_locateanything_direct_disease_v1
+  mode: native_locateanything
+  strategy: direct_disease
+  template: "Locate the {disease} in this chest X-ray"
+
+model:
+  name_or_path: nvidia/LocateAnything-3B
+  revision: c32291ca5e996f5a7a485845b4f57a233936bba0
+  dtype: bfloat16
+  base_llm_frozen: true
+  vision_encoder_frozen: true
+  projector_trainable: true
+  lora:
+    r: 8
+    alpha: 16
+    dropout: 0.05
+    bias: none
+
+objective:
+  loss_total: L_GRPO_PLUS_MEDGROUND_KL
+  supervised_losses: []
+  ppo_clip_epsilon: 0.2
+  old_policy_sync_interval_optimizer_steps: 1
+  group_size: 4
+  reference_kl:
+    enabled: true
+    beta: 0.04
+    estimator: exp_ref_minus_policy_minus_ref_minus_policy_minus_one
+    direction: policy_to_reference
+    granularity: sampled_trajectory_token
+    normalization: mean_tokens_per_trajectory_then_mean_group
+    mask: full_hybrid_sampled_trajectory
+    include_rejected_pbd_proposals: true
+    exclude_prompt_tokens: true
+    exclude_image_tokens: true
+    reference_policy: initial_fresh_start_policy
+    reference_storage: shared_frozen_base_with_cpu_snapshot_swap
+    reference_lora: initial_zero_effect_adapter_state
+    reference_projector: original_pretrained_state
+    reference_mode: eval
+    reference_autograd: disabled
+
+rollout:
+  path: stochastic_native_hybrid_rl
+  chain_of_box: false
+  block_size: 6
+  bbox_format: "<box><x1><y1><x2><y2></box>"
+  coordinate_token_id_range: [151677, 152677]
+  temperature: 1.0
+  top_k: 0
+  top_p: 1.0
+  repetition_penalty: 1.0
+  dynamic_filtering_enabled: false
+  reconstruct_actions_from_text: false
+  geometry_repair: false
+  force_first_box_block: false
+  max_sequence_length: 4096
+  max_new_tokens: 512
+  # Hybrid log-prob objective (see rl/hybrid_rl.py module docstring):
+  #   A full_trajectory (PRIMARY / default):
+  #     score full sampled PBD proposal (incl. rejected slots that gate
+  #     fallback) + committed NTP tokens  ==  log π(full Hybrid trajectory)
+  #   B conditional_committed_output (surrogate ablation only):
+  #     score only committed sequence tokens; SURROGATE — not log π(τ)
+  #     Use chestxray8_grpo_hybrid_native_conditional_ablation.yaml
+  hybrid:
+    enabled: true
+    logprob_objective: full_trajectory
+    # Kept for clarity; must agree with logprob_objective:
+    #   full_trajectory              -> score_rejected_pbd_proposals: true
+    #   conditional_committed_output -> score_rejected_pbd_proposals: false
+    score_rejected_pbd_proposals: true
+    prefer_committed_action_logprobs: true
+
+rewards:
+  parser: native_locateanything
+  use_final_answer_box_only: false
+  intermediate_box_reward: false
+  require_think_answer: false
+  use_decoder_committed_final_box: true
+  format:
+    type: binary_native_locateanything
+    weight: 1.0
+    require_exactly_one_native_box: true
+    require_valid_geometry: true
+    coordinate_range: [0, 1000]
+  spatial:
+    type: binary_iou
+    weight: 1.0
+    iou_threshold: 0.5
+    comparison: greater_than
+  semantic:
+    type: medclip_roi_text_cosine
+    weight: 1.0
+    frozen: true
+    image_input: native_predicted_roi
+    text_input: original_query
+    invalid_box_fallback: 0.0
+
+policy_state:
+  old_policy_frozen_during_rollout_accumulation_and_ppo: true
+  synchronize_after_optimizer_step_only: true
+  synchronized_parameters: [lora, mlp1_projector]
+  shared_frozen_base_serialized_snapshot_swap: true
+  reference_projector: original_pretrained_state
+
+data:
+  train_split: splits/train80_pairs_seed42.jsonl
+  train_sha256: a2b1c25f652f90e8d93e58b33ee74aa5eb09db4df7c6b37e760f5e5238c2e3b0
+  test_split: splits/test_pairs_seed42.jsonl
+  test_sha256: 783965de02032ad44cc387afa22cd2382649330a0f5f39e0caf5a62d3385a2ed
+
+viability:
+  sample_count: 100
+  selection_seed: 42
+  optimizer_updates: 0
+  save_checkpoints: false
+  save_rollout_traces: true
+  save_machine_readable_metrics: true
+  representative_examples: 20
+
+training:
+  seed: 42
+  num_epochs: 3
+  max_optimizer_steps: 2370
+  learning_rate: 2.0e-5
+  projector_learning_rate: 1.0e-5
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  use_8bit_adam: false
+  checkpoint_interval: 100
+  resume_from_checkpoint: null
+  gradient_accumulation_samples: 1
+  replay_microbatch_size: 1
+  gradient_replay_use_cache: true
+  gradient_checkpointing: false
+  ppo_epochs: 1
+
+# Authoritative production execution contract. The trainer validates every
+# value before model load and uses replay_cache directly for exact replay.
+runtime_contract:
+  carry_cache: true
+  replay_cache: true
+  live_cache_replay: true
+  full_trajectory: true
+  detach_kv: false
+  truncated_bptt: false
+  gradient_checkpointing: false
+  saved_tensor_offload: false
+
+evaluation:
+  seed: 42
+  max_new_tokens: 512
+  ordinary_temperature: 0.0
+  modes:
+    - rl_native_stochastic_hybrid
+    - rl_native_stochastic_pbd
+    - fast_mtp
+    - slow_ntp
+    - hybrid
+  metrics:
+    - mean_iou
+    - median_iou
+    - recall_at_0_5
+    - valid_output_rate
+
+outputs:
+  viability_root: results/chestxray8_hybrid_grpo_native_medground_kl/viability
+  training_root: results/chestxray8_hybrid_grpo_native_medground_kl/training
+  evaluation_root: results/chestxray8_hybrid_grpo_native_medground_kl/evaluation
+  refuse_nonempty_output_dir: true
+
+medclip:
+  source: RyanWangZf/MedCLIP
+  source_commit: 9c3396f20d5d54e4fae241b8cb06ca45848e98c9
+  variant: MedCLIPVisionModelViT
+  weights: /auto/data2/ykorkmaz/models/medclip-vit/pytorch_model.bin
+  weights_sha256: 07bf9f917ccce482ea30ec84e533a30c3ad395c424d3624f6b72edf8484f8126
+  source_path: /auto/data2/ykorkmaz/models/MedCLIP
+  weights_archive: /auto/data2/ykorkmaz/models/medclip-vit/medclip-vit-pretrained.zip
+  weights_archive_sha256: 414b3ac515431c06018400ab2d83ee7307e314020cd4f6babbfdea4a58515725
+  text_backbone:
+    name: emilyalsentzer/Bio_ClinicalBERT
+    revision: d5892b39a4adaed74b92212a44081509db72f87b
+    checkpoint_sha256: a18c4c260fb5c0978b86658615106d5617050b5f14dac6ceb5e0d8beb2f9f719
+  vision_backbone:
+    name: microsoft/swin-tiny-patch4-window7-224
+    revision: d00d478bfaf1f417d34a1186673ad4b4be264c51
+    safetensors_sha256: a941acf68a76b365d67738d6c6dce4f0db3ea5224b7cff856d3f8f3753502d29
+    pytorch_bin_sha256: f2a3c1bc4ebd5f87ab22331b134c593dd24288c2dbaf7071ad49b4d9c59842d6

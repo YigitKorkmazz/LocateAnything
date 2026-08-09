@@ -1,0 +1,90 @@
+{
+  "format": "saved_g4_rollout_diversity_v1",
+  "source": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_production_500_train80_seed42_revalidated_20260808/two_gpu_g4_grpo_multistep_metrics.jsonl",
+  "groups": 578,
+  "trajectories": 2312,
+  "bbox": {
+    "valid_box_count": 2245,
+    "valid_box_rate": 0.9710207612456747,
+    "all_trajectory_pairs": 3468,
+    "exact_duplicate_state_pair_rate_including_invalid_none": 0.2491349480968858,
+    "valid_valid_pairs": 3291,
+    "exact_duplicate_box_pair_rate_among_valid_pairs": 0.25888787602552416,
+    "mean_pairwise_coordinate_l1_per_coordinate_norm01": 0.015227438468550594,
+    "median_pairwise_coordinate_l1_per_coordinate_norm01": 0.0005,
+    "mean_pairwise_coordinate_l2_norm01": 0.04768362239019449,
+    "mean_pairwise_box_iou": 0.9444032783680465,
+    "coordinate_population_std_norm01_mean_across_eligible_groups": {
+      "x1": 0.017957148407464454,
+      "y1": 0.014746298275932747,
+      "x2": 0.01351882323056261,
+      "y2": 0.01384692617998387
+    },
+    "groups_with_at_least_two_valid_boxes": 575
+  },
+  "token_sequences": {
+    "evidence": "exact generated-token sequence equality via saved SHA-256 checksum; token IDs were not retained in the production JSONL",
+    "trajectory_pairs": 3468,
+    "exact_duplicate_sequence_pair_rate": 0.20818915801614762,
+    "mean_unique_sequences_per_group": 3.1972318339100347,
+    "groups_with_four_unique_sequences": 317,
+    "groups_with_any_exact_sequence_duplicate": 261
+  },
+  "best_raw_iou": {
+    "mean": 0.08246527777501092,
+    "median": 0.04762183462477457,
+    "maximum": 0.5577028479931383,
+    "q90": 0.2035667164393085,
+    "q95": 0.2526233032345256,
+    "distance_below_0_5_for_nonwinning_groups": {
+      "mean": 0.41835835752866,
+      "median": 0.4524028533037542,
+      "minimum_closest_miss": 0.04434756041181742
+    },
+    "bins": {
+      "0-.1": {
+        "count": 397,
+        "fraction": 0.6868512110726643
+      },
+      ".1-.25": {
+        "count": 150,
+        "fraction": 0.25951557093425603
+      },
+      ".25-.4": {
+        "count": 23,
+        "fraction": 0.039792387543252594
+      },
+      ".4-.5": {
+        "count": 7,
+        "fraction": 0.012110726643598616
+      },
+      ">.5": {
+        "count": 1,
+        "fraction": 0.0017301038062283738
+      }
+    }
+  },
+  "binary_spatial": {
+    "successful_trajectories": 4,
+    "trajectory_success_rate": 0.0017301038062283738,
+    "observed_mixed_g4_groups": 0,
+    "observed_mixed_g4_group_rate": 0.0,
+    "all_success_g4_groups": 1,
+    "all_zero_g4_groups": 577
+  },
+  "g8_estimate": {
+    "pooled_iid_assumption": {
+      "mixed_g4_probability": 0.00690247636650888,
+      "mixed_g8_probability": 0.013757308570823024,
+      "absolute_increase": 0.006854832204314144,
+      "expected_mixed_groups_in_150_attempts_g8": 2.0635962856234533
+    },
+    "heterogeneity_aware_two_observed_g4_blocks": {
+      "mixed_g8_probability": 0.0034542210940960954,
+      "expected_mixed_groups_in_150_attempts": 0.5181331641144143,
+      "caveat": "combines observed all-success/all-failure G4 block frequencies; prompts and policy steps are not replicated"
+    },
+    "diagnosis": "unlikely_to_materially_increase_mixed_binary_spatial_groups_under_observed_distribution",
+    "reason": "successes were rare and perfectly group-clustered; doubling samples cannot create mixed rewards when per-prompt success probability is near 0 or 1"
+  }
+}

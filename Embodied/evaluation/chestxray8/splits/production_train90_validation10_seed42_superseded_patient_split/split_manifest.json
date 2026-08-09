@@ -1,0 +1,73 @@
+{
+  "format": "chestxray8_patient_disjoint_internal_validation_v1",
+  "heldout_test": {
+    "disease_counts": {
+      "Atelectasis": 39,
+      "Cardiomegaly": 34,
+      "Effusion": 24,
+      "Infiltration": 21,
+      "Mass": 14,
+      "Nodule": 15,
+      "Pneumonia": 28,
+      "Pneumothorax": 19
+    },
+    "patient_count": 145,
+    "sample_count": 194
+  },
+  "heldout_test_sha256": "783965de02032ad44cc387afa22cd2382649330a0f5f39e0caf5a62d3385a2ed",
+  "optimization": {
+    "disease_counts": {
+      "Atelectasis": 127,
+      "Cardiomegaly": 96,
+      "Effusion": 104,
+      "Infiltration": 89,
+      "Mass": 61,
+      "Nodule": 58,
+      "Pneumonia": 82,
+      "Pneumothorax": 70
+    },
+    "patient_count": 556,
+    "sample_count": 687
+  },
+  "optimization_manifest": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/production_train90_validation10_seed42/optimization90_of_train80_seed42.jsonl",
+  "optimization_sha256": "ec61ef65afab1ac45d20dc14acecb32bc0bddf105e14efa9382792ce9771ada6",
+  "patient_overlap": {
+    "optimization_test": false,
+    "optimization_validation": false,
+    "validation_test": false
+  },
+  "seed": 42,
+  "source_train": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/train80_pairs_seed42.jsonl",
+  "source_train_sha256": "a2b1c25f652f90e8d93e58b33ee74aa5eb09db4df7c6b37e760f5e5238c2e3b0",
+  "train80": {
+    "disease_counts": {
+      "Atelectasis": 141,
+      "Cardiomegaly": 112,
+      "Effusion": 129,
+      "Infiltration": 102,
+      "Mass": 71,
+      "Nodule": 64,
+      "Pneumonia": 92,
+      "Pneumothorax": 79
+    },
+    "patient_count": 581,
+    "sample_count": 790
+  },
+  "validation": {
+    "disease_counts": {
+      "Atelectasis": 14,
+      "Cardiomegaly": 16,
+      "Effusion": 25,
+      "Infiltration": 13,
+      "Mass": 10,
+      "Nodule": 6,
+      "Pneumonia": 10,
+      "Pneumothorax": 9
+    },
+    "patient_count": 25,
+    "sample_count": 103
+  },
+  "validation_fraction": 0.1,
+  "validation_manifest": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/production_train90_validation10_seed42/validation10_of_train80_seed42.jsonl",
+  "validation_sha256": "931180a1ae26ab153f0a99ac38aa8de43e3ec254472730ebf30cff060d545513"
+}

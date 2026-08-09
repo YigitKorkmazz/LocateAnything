@@ -1,6 +1,7 @@
 experiment: chestxray8_reward_only_grpo_native_pbd
 prompt:
   name: fixed_chain_of_box_v1
+  mode: chain_of_box
   template: |-
     You are given a chest X-ray image and a medical finding.
 
@@ -74,6 +75,7 @@ rollout:
   max_new_tokens: 512
 
 rewards:
+  parser: chain_of_box
   use_final_answer_box_only: true
   intermediate_box_reward: false
   format:
@@ -127,6 +129,9 @@ training:
   checkpoint_interval: 100
   resume_from_checkpoint: null
   gradient_accumulation_samples: 1
+  replay_microbatch_size: 1
+  gradient_replay_use_cache: false
+  gradient_checkpointing: false
   ppo_epochs: 1
 
 evaluation:

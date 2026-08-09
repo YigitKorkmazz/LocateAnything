@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import inspect
+import json
 import math
 import sys
+import tempfile
 from pathlib import Path
 
 import torch
@@ -79,6 +81,51 @@ def test_top_p_keeps_boundary_token_and_normalizes() -> None:
     )
     assert set(dist.token_ids.tolist()) == {0, 1}
     assert torch.allclose(dist.probs.sum(), torch.tensor(1.0), atol=1e-7)
+
+
+def test_invalid_sampling_distribution_is_reported_before_multinomial() -> None:
+    destination = Path(tempfile.mkdtemp()) / "invalid_sampling_distribution.json"
+    logits = torch.tensor([0.0, float("nan"), 1.0])
+    try:
+        build_filtered_categorical(
+            logits,
+            history_ids=[],
+            config=PBDSamplingConfig(),
+            diagnostic_context={
+                "diagnostic_json_path": str(destination),
+                "sample_id": "cpu-test",
+                "trajectory_index": 0,
+                "hybrid_block_index": 13,
+                "branch": "PBD proposal",
+            },
+        )
+    except AssertionError as exc:
+        assert "invalid sampling distribution" in str(exc)
+    else:
+        raise AssertionError("invalid logits unexpectedly reached sampling")
+    report = json.loads(destination.read_text())
+    assert report["first_invalid_stage"] == "raw_logits"
+    assert report["stages"]["raw_logits"]["nan_count"] == 1
+    assert report["stages"]["softmax_probabilities"]["nan_count"] == 3
+
+
+def test_empty_allowed_mask_is_reported_without_uniform_fallback() -> None:
+    destination = Path(tempfile.mkdtemp()) / "invalid_sampling_distribution.json"
+    try:
+        build_filtered_categorical(
+            torch.zeros(4),
+            history_ids=[],
+            config=PBDSamplingConfig(),
+            allowed_token_ids=[],
+            diagnostic_context={"diagnostic_json_path": str(destination)},
+        )
+    except AssertionError as exc:
+        assert "allowed-token mask is empty" in str(exc)
+    else:
+        raise AssertionError("empty allowed-token support unexpectedly continued")
+    report = json.loads(destination.read_text())
+    assert report["status"] == "all_tokens_masked"
+    assert report["allowed_count"] == 0
 
 
 def test_parallel_slots_use_only_committed_prefix_for_repetition() -> None:

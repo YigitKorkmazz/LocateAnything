@@ -6,13 +6,28 @@ import hashlib
 import json
 import random
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import torch
 import yaml
 
-from rl.pbd_rl import PBDSamplingConfig, RolloutTrace, StochasticPBDRLDecoder
-from rl.prompt import build_rl_messages
+from rl.hybrid_rl import (
+    DEFAULT_LOGPROB_OBJECTIVE,
+    LOGPROB_OBJECTIVE_CONDITIONAL_COMMITTED,
+    LOGPROB_OBJECTIVE_FULL_TRAJECTORY,
+    VALID_LOGPROB_OBJECTIVES,
+    HybridRolloutReplayer,
+    StochasticHybridRLDecoder,
+    resolve_logprob_objective,
+)
+from rl.pbd_rl import (
+    PBDRolloutReplayer,
+    PBDSamplingConfig,
+    RolloutTrace,
+    StochasticPBDRLDecoder,
+)
+from rl.prompt import VALID_PROMPT_MODES, build_rl_messages, resolve_prompt_mode
+from rl.rewards import VALID_PARSERS, resolve_parser_name
 from sft_common import LLM_LORA_TARGET_MODULES, read_jsonl
 from train_chestxray8_sft import (
     apply_llm_lora,
@@ -23,19 +38,118 @@ from train_chestxray8_sft import (
 
 CHEST_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "chestxray8_grpo_pbd.yaml"
+DEFAULT_NATIVE_CONFIG = (
+    Path(__file__).resolve().parent / "chestxray8_grpo_pbd_native.yaml"
+)
+DEFAULT_HYBRID_NATIVE_CONFIG = (
+    Path(__file__).resolve().parent / "chestxray8_grpo_hybrid_native.yaml"
+)
+DEFAULT_HYBRID_MEDGROUND_KL_CONFIG = (
+    Path(__file__).resolve().parent
+    / "chestxray8_grpo_hybrid_native_medground_kl.yaml"
+)
+
+VALID_LOSS_TOTALS = ("L_GRPO", "L_GRPO_PLUS_MEDGROUND_KL")
+
+ROLLOUT_PATH_PBD = "stochastic_native_pbd_rl"
+ROLLOUT_PATH_HYBRID = "stochastic_native_hybrid_rl"
+# Legacy CoB YAML may omit path or use an older alias.
+VALID_ROLLOUT_PATHS = (
+    ROLLOUT_PATH_PBD,
+    ROLLOUT_PATH_HYBRID,
+    "stochastic_pbd_rl",
+)
 
 
 def load_resolved_config(path: str | Path = DEFAULT_CONFIG) -> Dict[str, Any]:
     config_path = Path(path).resolve()
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    if config["objective"]["loss_total"] != "L_GRPO":
-        raise RuntimeError("resolved config must use L_total=L_GRPO")
+    if config["objective"]["loss_total"] not in VALID_LOSS_TOTALS:
+        raise RuntimeError(
+            "resolved config must use L_GRPO or L_GRPO_PLUS_MEDGROUND_KL"
+        )
     if config["objective"].get("supervised_losses") != []:
         raise RuntimeError("resolved config must not contain supervised losses")
     if int(config["objective"]["group_size"]) != 4:
         raise RuntimeError("this experiment requires G=4")
+    # Default missing mode keys for the legacy Chain-of-Box YAML.
+    prompt_cfg = config.setdefault("prompt", {})
+    prompt_cfg.setdefault("mode", "chain_of_box")
+    reward_cfg = config.setdefault("rewards", {})
+    reward_cfg.setdefault("parser", "chain_of_box")
+    mode = resolve_prompt_mode(config)
+    parser = resolve_parser_name(config)
+    if mode not in VALID_PROMPT_MODES:
+        raise RuntimeError(f"unsupported prompt.mode={mode!r}")
+    if parser not in VALID_PARSERS:
+        raise RuntimeError(f"unsupported rewards.parser={parser!r}")
+    if mode == "native_locateanything" and parser != "native_locateanything":
+        raise RuntimeError(
+            "native_locateanything prompt mode requires rewards.parser=native_locateanything"
+        )
+    if mode == "chain_of_box" and parser != "chain_of_box":
+        raise RuntimeError(
+            "chain_of_box prompt mode requires rewards.parser=chain_of_box"
+        )
+    if mode == "native_locateanything" and bool(config["rollout"].get("chain_of_box")):
+        raise RuntimeError("native mode requires rollout.chain_of_box=false")
+    rollout_path = config["rollout"].get("path", ROLLOUT_PATH_PBD)
+    if rollout_path not in VALID_ROLLOUT_PATHS and mode == "native_locateanything":
+        raise RuntimeError(f"unsupported rollout.path={rollout_path!r}")
+    if rollout_path == ROLLOUT_PATH_HYBRID:
+        hybrid_cfg = config["rollout"].get("hybrid") or {}
+        objective = resolve_logprob_objective(
+            hybrid_cfg.get("logprob_objective", DEFAULT_LOGPROB_OBJECTIVE)
+        )
+        score_rejected = bool(hybrid_cfg.get("score_rejected_pbd_proposals", False))
+        if objective == LOGPROB_OBJECTIVE_CONDITIONAL_COMMITTED and score_rejected:
+            raise RuntimeError(
+                "conditional_committed_output is a surrogate that excludes "
+                "rejected PBD proposal tokens; set score_rejected_pbd_proposals=false "
+                "or switch hybrid.logprob_objective to full_trajectory"
+            )
+        if objective == LOGPROB_OBJECTIVE_FULL_TRAJECTORY and not score_rejected:
+            raise RuntimeError(
+                "full_trajectory must include the sampled PBD proposal tokens "
+                "that determine the fallback gate; set "
+                "score_rejected_pbd_proposals=true"
+            )
+        hybrid_cfg["logprob_objective"] = objective
+        config["rollout"]["hybrid"] = hybrid_cfg
+        if bool(config["rollout"].get("reconstruct_actions_from_text")):
+            raise RuntimeError(
+                "Hybrid GRPO forbids reconstruct_actions_from_text"
+            )
     config["_config_path"] = str(config_path)
     return config
+
+
+def resolve_rollout_path(config: Dict[str, Any]) -> str:
+    path = config.get("rollout", {}).get("path", ROLLOUT_PATH_PBD)
+    if path == "stochastic_pbd_rl":
+        return ROLLOUT_PATH_PBD
+    return str(path)
+
+
+def is_hybrid_rollout(config: Dict[str, Any]) -> bool:
+    return resolve_rollout_path(config) == ROLLOUT_PATH_HYBRID
+
+
+def hybrid_logprob_objective(config: Dict[str, Any]) -> str:
+    hybrid_cfg = config.get("rollout", {}).get("hybrid") or {}
+    return resolve_logprob_objective(
+        hybrid_cfg.get("logprob_objective", DEFAULT_LOGPROB_OBJECTIVE)
+    )
+
+
+def build_rollout_replayer(model, tokenizer, config: Dict[str, Any]):
+    if is_hybrid_rollout(config):
+        return HybridRolloutReplayer(
+            model,
+            tokenizer,
+            logprob_objective=hybrid_logprob_objective(config),
+        )
+    return PBDRolloutReplayer(model, tokenizer)
 
 
 def resolve_data_path(value: str) -> Path:
@@ -127,16 +241,48 @@ def build_policy(config: Dict[str, Any], device: torch.device):
         dropout=float(lora["dropout"]),
         target_modules=LLM_LORA_TARGET_MODULES,
     )
-    unfreeze_mlp1(model)
+    # GRPO historically used Case-B (LoRA + projector).  Memory probes and
+    # LoRA-only experiments keep the identical base/prompt/rollout path while
+    # leaving mlp1 frozen, as requested by model.projector_trainable.
+    if bool(model_cfg.get("projector_trainable", True)):
+        unfreeze_mlp1(model)
     return model, tokenizer, processor, revision
+
+
+def build_policy_two_gpu_live_cache(
+    config: Dict[str, Any],
+    *,
+    first_device: str | torch.device = "cuda:0",
+    second_device: str | torch.device = "cuda:1",
+    on_pre_forward_layout=None,
+):
+    """Build Case-B LoRA policy, then install the exact 18/18 decoder shard.
+
+    The initial full ``cuda:0`` placement is intentional: PEFT injects LoRA
+    there first, then the sharder moves every LoRA module recursively with its
+    owning decoder layer.  Do not call ``model.to(...)`` after this function.
+    """
+    from rl.two_gpu_shard import shard_locateanything_decoder_two_gpu
+
+    primary = torch.device(first_device)
+    model, tokenizer, processor, revision = build_policy(config, primary)
+    shard_report = shard_locateanything_decoder_two_gpu(
+        model,
+        first_device=first_device,
+        second_device=second_device,
+        first_layer_count=18,
+        on_pre_forward_layout=on_pre_forward_layout,
+    )
+    return model, tokenizer, processor, revision, shard_report
 
 
 def tokenize_rl_pair(
     processor,
     pair: Dict[str, Any],
     device: torch.device,
+    config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    messages = build_rl_messages(pair)
+    messages = build_rl_messages(pair, config=config)
     text = processor.py_apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -175,20 +321,38 @@ def generate_rollout_group(
     config: Dict[str, Any],
     *,
     sample_seed: int,
+    diagnostic_observer: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> List[RolloutTrace]:
     group_size = int(config["objective"]["group_size"])
-    decoder = StochasticPBDRLDecoder(
-        model, tokenizer, sampling=sampling_from_config(config)
-    )
-    return [
-        decoder.generate(
+    sampling = sampling_from_config(config)
+    if is_hybrid_rollout(config):
+        decoder = StochasticHybridRLDecoder(
+            model,
+            tokenizer,
+            sampling=sampling,
+            logprob_objective=hybrid_logprob_objective(config),
+            diagnostic_observer=diagnostic_observer,
+        )
+    else:
+        decoder = StochasticPBDRLDecoder(model, tokenizer, sampling=sampling)
+    traces = []
+    for group_index in range(group_size):
+        # The sharded decoder consumes this only for pre-RoPE failure reports.
+        # It is metadata, not model input, cache, or RNG state.
+        try:
+            from rl.two_gpu_shard import resolve_locateanything_qwen_decoder
+            root = resolve_locateanything_qwen_decoder(model).decoder
+            root._chestxray8_rotary_context = {**dict(getattr(model, "_chestxray8_rotary_context_base", {}) or {}),
+                "trajectory_index": group_index, "rollout_seed": int(sample_seed) * group_size + group_index}
+        except Exception:
+            pass
+        traces.append(decoder.generate(
             **decoder_inputs(inputs),
             max_new_tokens=int(config["rollout"]["max_new_tokens"]),
             seed=int(sample_seed) * group_size + group_index,
             force_first_box_block=False,
-        )
-        for group_index in range(group_size)
-    ]
+        ))
+    return traces
 
 
 def trace_record(

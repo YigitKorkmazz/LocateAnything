@@ -9,6 +9,9 @@ in the rollout trace.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import json
+import math
+from pathlib import Path
 from types import MethodType
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -60,9 +63,15 @@ class BlockTrace:
     input_window_ids: List[int]
     action_token_ids: List[int]
     slots: List[SlotTrace] = field(default_factory=list)
+    # Hybrid-aware metadata. PBD-only leaves defaults.
+    scored_for_grpo: bool = True
+    source: str = "pbd"  # "pbd" | "ntp_fallback" | "text"
+    rejected_proposal_token_ids: Optional[List[int]] = None
 
     @property
     def old_log_prob(self) -> float:
+        if not self.scored_for_grpo:
+            return 0.0
         return float(sum(slot.log_prob_old for slot in self.slots))
 
 
@@ -75,10 +84,24 @@ class RolloutTrace:
     stopped_on_eos: bool
     truncated: bool
     decoded_text: Optional[str] = None
+    # Final-prediction fields shared by PBD-only and Hybrid-aware GRPO.
+    decoder_path: str = "pbd"  # "pbd" | "hybrid"
+    reward_branch: str = "none"  # "pbd" | "ntp_fallback" | "none"
+    committed_final_box_norm_1000: Optional[Tuple[int, int, int, int]] = None
+    has_unambiguous_committed_box: bool = False
+    fallback_triggered: bool = False
+    rejected_pbd_proposals: List[Dict[str, Any]] = field(default_factory=list)
+    # Default-off Hybrid diagnostics. These are CPU/JSON values only.
+    stop_reason: Optional[str] = None
+    max_new_tokens: Optional[int] = None
+    max_reachable_generated_length: Optional[int] = None
+    proposal_events: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def old_log_prob(self) -> float:
-        return float(sum(block.old_log_prob for block in self.blocks))
+        return float(
+            sum(block.old_log_prob for block in self.blocks if block.scored_for_grpo)
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -88,14 +111,38 @@ class RolloutTrace:
 class FilteredCategorical:
     token_ids: torch.Tensor
     log_probs: torch.Tensor
+    sampling_probs: Optional[torch.Tensor] = None
+    sampling_diagnostic: Optional[Dict[str, Any]] = None
 
     @property
     def probs(self) -> torch.Tensor:
-        return self.log_probs.exp()
+        return self.sampling_probs if self.sampling_probs is not None else self.log_probs.exp()
 
     def sample(self, generator: Optional[torch.Generator] = None) -> Tuple[int, torch.Tensor]:
+        probabilities = self.probs.detach()
+        valid = bool(torch.isfinite(probabilities).all().item()) and bool(
+            (probabilities >= 0).all().item()
+        )
+        probability_sum = float(probabilities.float().sum().item())
+        if not valid or not probability_sum > 0.0:
+            report = dict(self.sampling_diagnostic or {})
+            report.update(
+                {
+                    "status": "invalid_sampling_distribution",
+                    "failure_operation": "immediately_before_torch.multinomial",
+                    "final_probability_sum": probability_sum,
+                }
+            )
+            _write_sampling_diagnostic(report)
+            raise AssertionError(
+                "invalid probability tensor before torch.multinomial: "
+                + json.dumps(report, sort_keys=True)
+            )
+        assert torch.isfinite(probabilities).all()
+        assert (probabilities >= 0).all()
+        assert probabilities.sum() > 0
         local_index = torch.multinomial(
-            self.probs.detach(), num_samples=1, generator=generator
+            probabilities, num_samples=1, generator=generator
         ).squeeze(0)
         action = self.token_ids[local_index]
         return int(action.item()), self.log_probs[local_index]
@@ -129,12 +176,25 @@ def _apply_repetition_penalty(
     return out
 
 
+def _write_sampling_diagnostic(report: Dict[str, Any]) -> None:
+    """Persist the CPU-readable failure record before the sampling exception."""
+    destination = report.get("diagnostic_json_path")
+    if not destination:
+        return
+    path = Path(destination)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
 def build_filtered_categorical(
     logits: torch.Tensor,
     *,
     history_ids: Sequence[int],
     config: PBDSamplingConfig,
     allowed_token_ids: Optional[Iterable[int]] = None,
+    diagnostic_context: Optional[Dict[str, Any]] = None,
 ) -> FilteredCategorical:
     """Build the exact categorical used for both sampling and replay.
 
@@ -142,34 +202,139 @@ def build_filtered_categorical(
     only among native coordinate tokens.
     """
     config.validate()
+    if not math.isfinite(float(config.temperature)) or float(config.temperature) <= 0:
+        raise ValueError("sampling temperature must be finite and > 0")
     if logits.dim() != 1:
         raise ValueError(f"expected 1D logits, got shape={tuple(logits.shape)}")
 
+    capture_diagnostics = diagnostic_context is not None
+
+    def stage_summary(
+        value: torch.Tensor,
+        *,
+        stage_token_ids: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        detached = value.detach()
+        finite = torch.isfinite(detached)
+        finite_values = detached[finite]
+        finite_indices = torch.nonzero(finite, as_tuple=False).reshape(-1)
+        argmax_index = (
+            int(finite_indices[torch.argmax(detached[finite].float())].item())
+            if finite_indices.numel()
+            else None
+        )
+        return {
+            "shape": list(detached.shape),
+            "dtype": str(detached.dtype),
+            "device": str(detached.device),
+            "finite_min": float(finite_values.min().float().item())
+            if finite_values.numel()
+            else None,
+            "finite_max": float(finite_values.max().float().item())
+            if finite_values.numel()
+            else None,
+            "nan_count": int(torch.isnan(detached).sum().item()),
+            "positive_inf_count": int(torch.isposinf(detached).sum().item()),
+            "negative_inf_count": int(torch.isneginf(detached).sum().item()),
+            "negative_count": int((detached < 0).sum().item()),
+            "finite_count": int(finite.sum().item()),
+            "numel": int(detached.numel()),
+            "argmax_index": argmax_index,
+            "argmax_token": int(stage_token_ids[argmax_index].item())
+            if argmax_index is not None and stage_token_ids is not None
+            else argmax_index,
+        }
+
+    def record_stage(
+        name: str,
+        value: torch.Tensor,
+        *,
+        stage_token_ids: Optional[torch.Tensor] = None,
+    ) -> None:
+        if capture_diagnostics:
+            report["stages"][name] = stage_summary(
+                value, stage_token_ids=stage_token_ids
+            )
+
+    report: Dict[str, Any] = dict(diagnostic_context or {})
+    report.update(
+        {
+            "temperature": float(config.temperature),
+            "temperature_is_finite_positive": True,
+            "top_k": int(config.top_k),
+            "top_p": float(config.top_p),
+            "repetition_penalty": float(config.repetition_penalty),
+            "stages": {},
+        }
+    )
+    record_stage("raw_logits", logits)
     processed = _apply_repetition_penalty(
         logits, history_ids, config.repetition_penalty
     )
+    report["repetition_penalty_is_identity"] = bool(
+        config.repetition_penalty == 1.0 and processed is logits
+    )
+    record_stage("post_repetition_penalty_logits", processed)
     if allowed_token_ids is None:
         token_ids = torch.arange(
             processed.numel(), device=processed.device, dtype=torch.long
         )
         selected = processed
+        allowed_mask = torch.ones(processed.numel(), dtype=torch.bool, device=processed.device)
     else:
         token_ids = torch.tensor(
             list(allowed_token_ids), device=processed.device, dtype=torch.long
         )
-        if token_ids.numel() == 0:
-            raise ValueError("allowed_token_ids cannot be empty")
-        if int(token_ids.min()) < 0 or int(token_ids.max()) >= processed.numel():
+        allowed_mask = torch.zeros(processed.numel(), dtype=torch.bool, device=processed.device)
+        if token_ids.numel() and (int(token_ids.min()) < 0 or int(token_ids.max()) >= processed.numel()):
             raise ValueError("allowed token ID outside vocabulary")
+        if token_ids.numel(): allowed_mask[token_ids] = True
+        if int(allowed_mask.sum().item()) == 0:
+            report.update({"status": "all_tokens_masked", "allowed_count": 0})
+            _write_sampling_diagnostic(report)
+            raise AssertionError(
+                "allowed-token mask is empty: " + json.dumps(report, sort_keys=True)
+            )
         selected = processed.index_select(0, token_ids)
-
+    allowed_count = int(allowed_mask.sum().item())
+    report.update(
+        {
+            "allowed_count": allowed_count,
+            "allowed_mask": {
+                "shape": list(allowed_mask.shape),
+                "dtype": str(allowed_mask.dtype),
+                "device": str(allowed_mask.device),
+                "true_count": allowed_count,
+                "false_count": int((~allowed_mask).sum().item()),
+            },
+        }
+    )
+    if capture_diagnostics:
+        masked_for_report = processed.masked_fill(~allowed_mask, float("-inf"))
+        record_stage("masked_logits", masked_for_report)
+        report["masked_logits_validation"] = {
+            "all_allowed_entries_finite": bool(
+                torch.isfinite(masked_for_report[allowed_mask]).all().item()
+            ),
+            "all_disallowed_entries_negative_inf": bool(
+                torch.isneginf(masked_for_report[~allowed_mask]).all().item()
+            )
+            if bool((~allowed_mask).any().item())
+            else True,
+        }
+    record_stage("allowed_selected_logits", selected, stage_token_ids=token_ids)
     selected = selected / config.temperature
+    record_stage("temperature_scaled_logits", selected, stage_token_ids=token_ids)
 
+    top_k_input = selected
     if config.top_k > 0 and config.top_k < selected.numel():
         _, keep_local = torch.topk(selected, k=config.top_k, dim=-1)
         token_ids = token_ids.index_select(0, keep_local)
         selected = selected.index_select(0, keep_local)
+    report["top_k_disabled_identity"] = bool(config.top_k == 0 and selected is top_k_input)
+    record_stage("post_top_k_logits", selected, stage_token_ids=token_ids)
 
+    top_p_input = selected
     if config.top_p < 1.0 and selected.numel() > 1:
         sorted_logits, sorted_local = torch.sort(selected, descending=True)
         cumulative = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
@@ -180,10 +345,61 @@ def build_filtered_categorical(
         sorted_local = sorted_local[keep]
         token_ids = token_ids.index_select(0, sorted_local)
         selected = selected.index_select(0, sorted_local)
+    report["top_p_disabled_identity"] = bool(config.top_p == 1.0 and selected is top_p_input)
+    record_stage("post_top_p_logits", selected, stage_token_ids=token_ids)
+
+    probabilities = torch.softmax(selected.float(), dim=-1)
+    record_stage("softmax_probabilities", probabilities, stage_token_ids=token_ids)
+    record_stage("final_probabilities", probabilities, stage_token_ids=token_ids)
+    report["final_probability_sum"] = float(probabilities.sum().item())
+    raw_valid = bool(torch.isfinite(logits).all().item())
+    selected_valid = bool(torch.isfinite(selected).all().item())
+    probs_valid = (
+        bool(torch.isfinite(probabilities).all().item())
+        and bool((probabilities >= 0).all().item())
+        and bool(probabilities.sum().item() > 0)
+    )
+    for stage in report["stages"].values():
+        stage["allowed_count"] = allowed_count
+    if not raw_valid or not selected_valid or not probs_valid:
+        report["status"] = "invalid_sampling_distribution"
+        invalid_stage = None
+        for name in (
+            "raw_logits",
+            "post_repetition_penalty_logits",
+            "allowed_selected_logits",
+            "temperature_scaled_logits",
+            "post_top_k_logits",
+            "post_top_p_logits",
+            "softmax_probabilities",
+            "final_probabilities",
+        ):
+            stage = report["stages"].get(name)
+            if stage and (
+                stage["nan_count"]
+                or stage["positive_inf_count"]
+                or stage["negative_inf_count"]
+                or ("probabilities" in name and stage["negative_count"])
+            ):
+                invalid_stage = name
+                break
+        report["first_invalid_stage"] = invalid_stage or (
+            "raw_logits"
+            if not raw_valid
+            else "allowed_or_filtered_logits"
+            if not selected_valid
+            else "softmax_probabilities"
+        )
+        _write_sampling_diagnostic(report)
+        raise AssertionError(
+            "invalid sampling distribution: " + json.dumps(report, sort_keys=True)
+        )
 
     return FilteredCategorical(
         token_ids=token_ids,
         log_probs=torch.log_softmax(selected.float(), dim=-1),
+        sampling_probs=probabilities,
+        sampling_diagnostic=report,
     )
 
 
@@ -214,12 +430,14 @@ def _sample_slot(
     token_ids: Dict[str, int],
     config: PBDSamplingConfig,
     generator: Optional[torch.Generator],
+    diagnostic_context: Optional[Dict[str, Any]] = None,
 ) -> SlotTrace:
     distribution = build_filtered_categorical(
         logits,
         history_ids=history_ids,
         config=config,
         allowed_token_ids=_support_ids(support_kind, token_ids),
+        diagnostic_context={**dict(diagnostic_context or {}), "slot_index": slot_index, "slot_type": support_kind},
     )
     action, log_prob = distribution.sample(generator=generator)
     return SlotTrace(
@@ -403,6 +621,27 @@ def _truncate_legacy_cache(past_key_values, length: int):
     )
 
 
+def _detach_legacy_cache(past_key_values):
+    """Return an immutable stop-grad copy of a legacy tuple KV cache.
+
+    Used by autograd-safe production-matching replay so carried past_key_values
+    never retain LoRA AccumulateGrad history across blocks.
+    """
+    if past_key_values is None:
+        return None
+    if not isinstance(past_key_values, (tuple, list)):
+        raise TypeError(
+            "LocateAnything PBD-RL expects the pinned model's legacy tuple KV cache"
+        )
+    return tuple(
+        (
+            kv[0].detach(),
+            kv[1].detach(),
+        )
+        for kv in past_key_values
+    )
+
+
 def _ensure_safe_image_processing(model) -> None:
     """Patch only image embedding injection; retain input_ids for PBD masking."""
     causal_lm = model.language_model
@@ -581,7 +820,9 @@ class StochasticPBDRLDecoder:
         truncated = not stopped and (
             budget_exhausted or int(generated.size(1)) >= total_length
         )
-        return RolloutTrace(
+        from rl.final_prediction import attach_pbd_final_prediction
+
+        trace = RolloutTrace(
             prompt_token_ids=input_ids[0].detach().cpu().tolist(),
             generated_token_ids=generated_ids,
             blocks=blocks,
@@ -592,15 +833,100 @@ class StochasticPBDRLDecoder:
                 generated_ids, skip_special_tokens=False
             ),
         )
+        return attach_pbd_final_prediction(trace, self.token_ids)
 
 
 class PBDRolloutReplayer:
-    """Recompute a rollout's exact PBD action probability under a model."""
+    """Recompute a rollout's exact PBD action probability under a model.
+
+    Trajectory log-probability is exactly the sum of scored block
+    log-probabilities. Replay always runs under ``model.eval()``.
+    """
 
     def __init__(self, model, tokenizer) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.token_ids = resolve_token_ids(model)
+
+    def _projector_visual_features(self, pixel_values, image_grid_hws):
+        pixel_values = pixel_values.to(self.model.language_model.dtype)
+        if isinstance(image_grid_hws, np.ndarray):
+            image_grid_hws = torch.from_numpy(image_grid_hws).to(
+                pixel_values.device, dtype=torch.int32
+            )
+        visual_features = self.model.extract_feature(pixel_values, image_grid_hws)
+        if image_grid_hws is not None:
+            visual_features = self.model.mlp1(torch.cat(visual_features, dim=0))
+        return visual_features, image_grid_hws
+
+    def _score_one_block(
+        self,
+        *,
+        block: BlockTrace,
+        generated: torch.Tensor,
+        mask_tail: torch.Tensor,
+        full_positions: torch.Tensor,
+        past_key_values,
+        visual_features,
+        inject_visual: bool,
+        carry_cache: bool,
+        sampling: PBDSamplingConfig,
+        block_size: int,
+        legacy_nocache_masks: bool = False,
+    ) -> Tuple[torch.Tensor, Any]:
+        if int(generated.size(1)) != block.prefix_length:
+            raise RuntimeError("replay prefix length differs from trace")
+        cache_before = _cache_length(past_key_values) if carry_cache else 0
+        if carry_cache and cache_before != block.cache_length_before:
+            raise RuntimeError("replay cache length differs from rollout trace")
+        model_use_cache = False if legacy_nocache_masks else True
+        window = torch.cat((generated, generated[:, -1:].clone(), mask_tail), dim=1)
+        if carry_cache:
+            position_ids = full_positions[:, cache_before : window.size(1)].clone()
+            past = past_key_values
+        else:
+            position_ids = full_positions[:, : window.size(1)].clone()
+            past = None
+        position_ids[0, -block_size:] -= 1
+        prepared = self.model.language_model.prepare_inputs_for_generation(
+            window,
+            past,
+            None,
+            inputs_embeds=None,
+            use_cache=model_use_cache,
+            position_ids=position_ids,
+        )
+        if carry_cache:
+            if position_ids[0].tolist() != block.position_ids:
+                raise RuntimeError("replay position IDs differ from rollout trace")
+            if prepared["input_ids"][0].tolist() != block.input_window_ids:
+                raise RuntimeError("replay input window differs from rollout trace")
+        outputs = _unwrap_lm_output(
+            _forward_language_model(
+                self.model,
+                prepared,
+                visual_features=visual_features if inject_visual else None,
+            )
+        )
+        block_logits = outputs.logits[0, -block_size:, :].float()
+        del outputs.logits
+        block_logp, _ = score_pbd_block(
+            block_logits,
+            block,
+            history_ids=generated[0].tolist(),
+            token_ids=self.token_ids,
+            config=sampling,
+        )
+        del block_logits
+        next_cache = None
+        if carry_cache:
+            prefix_length = int(generated.size(1))
+            next_cache = _truncate_legacy_cache(outputs.past_key_values, prefix_length)
+            if _cache_length(next_cache) != block.cache_length_after:
+                raise RuntimeError(
+                    "replay output cache length differs from rollout trace"
+                )
+        return block_logp, next_cache
 
     def score(
         self,
@@ -609,6 +935,9 @@ class PBDRolloutReplayer:
         pixel_values: torch.Tensor,
         input_ids: torch.Tensor,
         image_grid_hws,
+        use_cache: bool = True,
+        legacy_nocache_masks: bool = False,
+        on_scored_block_cache=None,
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         if input_ids[0].tolist() != trace.prompt_token_ids:
             raise RuntimeError("replay prompt does not match rollout trace")
@@ -626,62 +955,53 @@ class PBDRolloutReplayer:
         full_positions = torch.arange(
             max_length + block_size, device=device
         ).unsqueeze(0)
-        pixel_values = pixel_values.to(self.model.language_model.dtype)
-        if isinstance(image_grid_hws, np.ndarray):
-            image_grid_hws = torch.from_numpy(image_grid_hws).to(
-                pixel_values.device, dtype=torch.int32
-            )
-        visual_features = self.model.extract_feature(pixel_values, image_grid_hws)
-        if image_grid_hws is not None:
-            visual_features = self.model.mlp1(torch.cat(visual_features, dim=0))
+        visual_features, _ = self._projector_visual_features(
+            pixel_values, image_grid_hws
+        )
         past_key_values = None
         block_logps: List[torch.Tensor] = []
+        carry_cache = bool(use_cache)
+        scored_index = 0
 
         for block in trace.blocks:
-            if int(generated.size(1)) != block.prefix_length:
-                raise RuntimeError("replay prefix length differs from trace")
-            cache_before = _cache_length(past_key_values)
-            if cache_before != block.cache_length_before:
-                raise RuntimeError("replay cache length differs from rollout trace")
-            window = torch.cat(
-                (generated, generated[:, -1:].clone(), mask_tail), dim=1
+            if not getattr(block, "scored_for_grpo", True):
+                if block.action_token_ids:
+                    generated = torch.cat(
+                        [
+                            generated,
+                            torch.tensor(
+                                block.action_token_ids,
+                                device=device,
+                                dtype=generated.dtype,
+                            ).unsqueeze(0),
+                        ],
+                        dim=1,
+                    )
+                continue
+            inject_visual = (not carry_cache) or (not block_logps)
+            prior_cache = past_key_values
+            block_logp, past_key_values = self._score_one_block(
+                block=block,
+                generated=generated,
+                mask_tail=mask_tail,
+                full_positions=full_positions,
+                past_key_values=past_key_values,
+                visual_features=visual_features,
+                inject_visual=inject_visual,
+                carry_cache=carry_cache,
+                sampling=trace.sampling,
+                block_size=block_size,
+                legacy_nocache_masks=legacy_nocache_masks,
             )
-            position_ids = full_positions[:, cache_before : window.size(1)].clone()
-            position_ids[0, -block_size:] -= 1
-            prepared = self.model.language_model.prepare_inputs_for_generation(
-                window,
-                past_key_values,
-                None,
-                inputs_embeds=None,
-                use_cache=True,
-                position_ids=position_ids,
-            )
-            if position_ids[0].tolist() != block.position_ids:
-                raise RuntimeError("replay position IDs differ from rollout trace")
-            if prepared["input_ids"][0].tolist() != block.input_window_ids:
-                raise RuntimeError("replay input window differs from rollout trace")
-            outputs = _unwrap_lm_output(
-                _forward_language_model(
-                    self.model,
-                    prepared,
-                    visual_features=visual_features if not block_logps else None,
+            if on_scored_block_cache is not None:
+                on_scored_block_cache(
+                    scored_index,
+                    block,
+                    prior_cache,
+                    past_key_values,
                 )
-            )
-            block_logits = outputs.logits[0, -block_size:, :]
-            block_logp, _ = score_pbd_block(
-                block_logits,
-                block,
-                history_ids=generated[0].tolist(),
-                token_ids=self.token_ids,
-                config=trace.sampling,
-            )
             block_logps.append(block_logp)
-            prefix_length = int(generated.size(1))
-            past_key_values = _truncate_legacy_cache(
-                outputs.past_key_values, prefix_length
-            )
-            if _cache_length(past_key_values) != block.cache_length_after:
-                raise RuntimeError("replay output cache length differs from rollout trace")
+            scored_index += 1
             generated = torch.cat(
                 [
                     generated,
@@ -699,6 +1019,85 @@ class PBDRolloutReplayer:
         if not block_logps:
             return torch.zeros((), device=device, requires_grad=True), []
         return torch.stack(block_logps).sum(), block_logps
+
+    def iter_scored_block_logprobs(
+        self,
+        trace: RolloutTrace,
+        *,
+        pixel_values: torch.Tensor,
+        input_ids: torch.Tensor,
+        image_grid_hws,
+        use_cache: bool = False,
+        legacy_nocache_masks: bool = False,
+    ):
+        if input_ids[0].tolist() != trace.prompt_token_ids:
+            raise RuntimeError("replay prompt does not match rollout trace")
+        if use_cache:
+            raise RuntimeError(
+                "iter_scored_block_logprobs requires use_cache=False "
+                "(no carried KV) for independent per-block graphs"
+            )
+        self.model.eval()
+        block_size = trace.sampling.block_size
+        device = input_ids.device
+        generated = input_ids.clone()
+        mask_tail = torch.full(
+            (1, block_size - 1),
+            int(self.token_ids["default_mask_token_id"]),
+            dtype=input_ids.dtype,
+            device=device,
+        )
+        max_length = len(trace.prompt_token_ids) + len(trace.generated_token_ids)
+        full_positions = torch.arange(
+            max_length + block_size, device=device
+        ).unsqueeze(0)
+
+        for block in trace.blocks:
+            if not getattr(block, "scored_for_grpo", True):
+                if block.action_token_ids:
+                    generated = torch.cat(
+                        [
+                            generated,
+                            torch.tensor(
+                                block.action_token_ids,
+                                device=device,
+                                dtype=generated.dtype,
+                            ).unsqueeze(0),
+                        ],
+                        dim=1,
+                    )
+                continue
+            visual_features, _ = self._projector_visual_features(
+                pixel_values, image_grid_hws
+            )
+            block_logp, _ = self._score_one_block(
+                block=block,
+                generated=generated,
+                mask_tail=mask_tail,
+                full_positions=full_positions,
+                past_key_values=None,
+                visual_features=visual_features,
+                inject_visual=True,
+                carry_cache=False,
+                sampling=trace.sampling,
+                block_size=block_size,
+                legacy_nocache_masks=legacy_nocache_masks,
+            )
+            yield block_logp
+            generated = torch.cat(
+                [
+                    generated,
+                    torch.tensor(
+                        block.action_token_ids,
+                        device=device,
+                        dtype=generated.dtype,
+                    ).unsqueeze(0),
+                ],
+                dim=1,
+            )
+
+        if generated[0, len(trace.prompt_token_ids) :].tolist() != trace.generated_token_ids:
+            raise RuntimeError("replayed actions differ from emitted rollout tokens")
 
     def score_one_block_group(
         self,

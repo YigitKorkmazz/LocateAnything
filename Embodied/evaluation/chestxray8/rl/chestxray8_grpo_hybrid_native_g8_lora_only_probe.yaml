@@ -1,0 +1,51 @@
+# Prepared-only overlay for an RTX 3090 G=8, one-update memory probe.
+# This file is consumed by two_gpu_g8_one_update_memory_probe.py and is not a
+# standalone training config.  The launcher deep-merges these exact overrides
+# into the pinned production Hybrid/KL-free config, then enforces them again.
+base_config: chestxray8_grpo_hybrid_native.yaml
+
+probe:
+  status: prepared_do_not_run_automatically
+  optimizer_updates: 1
+  group_size: 8
+  required_gpu_name_substring: RTX 3090
+  visible_gpu_count: 2
+
+overrides:
+  experiment: chestxray8_g8_one_update_rtx3090_memory_probe_lora_only
+  hardware:
+    required_gpu_name_substring: RTX 3090
+    visible_gpu_count: 2
+    decoder_layer_split: [18, 18]
+  model:
+    projector_trainable: false
+  objective:
+    loss_total: L_GRPO
+    group_size: 8
+    reference_kl:
+      enabled: false
+  policy_state:
+    synchronized_parameters: [lora]
+    reference_projector: frozen_pretrained_state
+  data:
+    train_split: splits/production_train90_validation10_seed42/optimization90_of_train80_seed42.jsonl
+    train_sha256: 4edbed2071e4010c83c45ce8d33d341e0813fba2276150c82c990f1c7e9822f6
+  training:
+    learning_rate: 1.0e-5
+    projector_learning_rate: 1.0e-5
+    max_optimizer_steps: 1
+    checkpoint_interval: 25
+
+locked_contract:
+  reward_weights: {format: 1.0, spatial: 1.0, semantic: 1.0}
+  spatial_comparison: greater_than
+  spatial_iou_threshold: 0.5
+  parser: native_locateanything
+  use_decoder_committed_final_box: true
+  semantic_type: medclip_roi_text_cosine
+  semantic_image_input: native_predicted_roi
+  semantic_text_input: original_query
+  projector_trainable: false
+  lora_learning_rate: 1.0e-5
+  kl_enabled_initially: false
+  eventual_validation_checkpoint_interval: 25

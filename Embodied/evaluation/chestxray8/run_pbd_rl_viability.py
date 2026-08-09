@@ -16,9 +16,14 @@ sys.path.insert(0, str(CHEST_DIR))
 sys.path.insert(0, str(REPO_ROOT))
 
 from rl.grpo import group_relative_advantages  # noqa: E402
-from rl.rewards import MedCLIPSemanticScorer, ProductionRewardPipeline  # noqa: E402
+from rl.rewards import (  # noqa: E402
+    MedCLIPSemanticScorer,
+    build_reward_pipeline_from_config,
+)
 from rl.runtime import (  # noqa: E402
     DEFAULT_CONFIG,
+    DEFAULT_HYBRID_NATIVE_CONFIG,
+    DEFAULT_NATIVE_CONFIG,
     append_jsonl,
     assert_new_output_dir,
     build_policy,
@@ -51,8 +56,22 @@ def build_viability_plan(config: Dict[str, Any], population_size: int) -> Dict[s
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+    parser = argparse.ArgumentParser(
+        description=(
+            "100-sample rollout-only PBD-RL viability. "
+            "Select prompt/reward mode via --config YAML "
+            "(Chain-of-Box or native LocateAnything)."
+        )
+    )
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG),
+        help=(
+            "Resolved experiment YAML. Use "
+            f"{DEFAULT_NATIVE_CONFIG.name} for PBD-only native format, or "
+            f"{DEFAULT_HYBRID_NATIVE_CONFIG.name} for Hybrid-aware native."
+        ),
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
@@ -83,6 +102,21 @@ def main() -> None:
             for index, pair in zip(plan["sample_indices"], selected)
         ],
     )
+    write_json(
+        output_dir / "resolved_config.json",
+        {
+            "config_path": config["_config_path"],
+            "prompt_mode": config["prompt"]["mode"],
+            "reward_parser": config["rewards"]["parser"],
+            "rollout_path": config["rollout"].get("path"),
+            "reward_weights": {
+                "format": config["rewards"]["format"]["weight"],
+                "spatial": config["rewards"]["spatial"]["weight"],
+                "semantic": config["rewards"]["semantic"]["weight"],
+            },
+            "experiment": config.get("experiment"),
+        },
+    )
     if args.dry_run:
         print(f"DRY RUN OK: {output_dir / 'viability_plan.json'}")
         return
@@ -90,14 +124,7 @@ def main() -> None:
     device = torch.device(args.device)
     model, tokenizer, processor, revision = build_policy(config, device)
     scorer = MedCLIPSemanticScorer(device=device)
-    reward_cfg = config["rewards"]
-    rewards = ProductionRewardPipeline(
-        scorer,
-        format_weight=reward_cfg["format"]["weight"],
-        spatial_weight=reward_cfg["spatial"]["weight"],
-        semantic_weight=reward_cfg["semantic"]["weight"],
-        iou_threshold=reward_cfg["spatial"]["iou_threshold"],
-    )
+    rewards = build_reward_pipeline_from_config(config, scorer)
     all_records: List[Dict[str, Any]] = []
     examples: List[Dict[str, Any]] = []
     trace_path = output_dir / "rollout_traces.jsonl"
@@ -105,7 +132,7 @@ def main() -> None:
     for ordinal, (sample_index, pair) in enumerate(
         zip(plan["sample_indices"], selected)
     ):
-        inputs = tokenize_rl_pair(processor, pair, device)
+        inputs = tokenize_rl_pair(processor, pair, device, config=config)
         traces = generate_rollout_group(
             model,
             tokenizer,
@@ -114,7 +141,7 @@ def main() -> None:
             sample_seed=plan["selection_seed"] + sample_index,
         )
         components = [
-            rewards.score(trace.decoded_text or "", pair) for trace in traces
+            rewards.score_from_trace(trace, pair) for trace in traces
         ]
         advantages = group_relative_advantages(
             [component.total_reward for component in components]
@@ -145,6 +172,8 @@ def main() -> None:
         "checkpoint_saving": False,
         "model_revision": revision,
         "config_path": config["_config_path"],
+        "prompt_mode": config["prompt"]["mode"],
+        "reward_parser": config["rewards"]["parser"],
     }
     write_json(output_dir / "viability_metrics.json", summary)
     write_json(output_dir / "representative_completions.json", examples)

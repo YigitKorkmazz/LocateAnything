@@ -1,0 +1,326 @@
+{
+  "format": "g8_caseb_internal_validation_selection_v1",
+  "scope": "internal validation model selection only; not final test performance",
+  "manifest": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/production_train90_validation10_seed42/validation10_of_train80_seed42.jsonl",
+  "manifest_sha256": "f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838",
+  "sample_count": 80,
+  "heldout_test_used": false,
+  "same_samples_and_seeds_verified": true,
+  "conditions": {
+    "frozen_base": {
+      "checkpoint": null,
+      "n_samples": 80,
+      "valid_native_box_rate": 0.675,
+      "malformed_or_no_box_rate": 0.325,
+      "mean_iou": 0.10398569402750124,
+      "median_iou": 0.03985674700019938,
+      "strict_iou_gt_0_5_rate": 0.025,
+      "mean_semantic_reward": 0.010395512051763945,
+      "mean_total_reward": 0.710395512051764,
+      "mean_normalized_box_area_among_valid": 0.5462937037037037,
+      "near_full_image_rate_all_samples": 0.1125,
+      "near_full_image_rate_among_valid": 0.16666666666666666,
+      "branch_distribution_counts": {
+        "pbd": 58,
+        "ntp_fallback": 1,
+        "none": 21
+      },
+      "branch_distribution_rates": {
+        "pbd": 0.725,
+        "ntp_fallback": 0.0125,
+        "none": 0.2625
+      },
+      "mean_generated_token_count": 19.825,
+      "truncation_count": 0,
+      "per_sample_jsonl": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/all_checkpoints_internal_validation/frozen_base_per_sample.jsonl"
+    },
+    "step_025": {
+      "checkpoint": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_025.pt",
+      "n_samples": 80,
+      "valid_native_box_rate": 0.875,
+      "malformed_or_no_box_rate": 0.125,
+      "mean_iou": 0.10967158186751083,
+      "median_iou": 0.06560737716156587,
+      "strict_iou_gt_0_5_rate": 0.0125,
+      "mean_semantic_reward": 0.01191877651726827,
+      "mean_total_reward": 0.8994187765172683,
+      "mean_normalized_box_area_among_valid": 0.6174356142857143,
+      "near_full_image_rate_all_samples": 0.1625,
+      "near_full_image_rate_among_valid": 0.18571428571428572,
+      "branch_distribution_counts": {
+        "pbd": 71,
+        "ntp_fallback": 0,
+        "none": 9
+      },
+      "branch_distribution_rates": {
+        "pbd": 0.8875,
+        "ntp_fallback": 0.0,
+        "none": 0.1125
+      },
+      "mean_generated_token_count": 18.5125,
+      "truncation_count": 0,
+      "per_sample_jsonl": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/all_checkpoints_internal_validation/step_025_per_sample.jsonl"
+    },
+    "step_050": {
+      "checkpoint": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_050.pt",
+      "n_samples": 80,
+      "valid_native_box_rate": 0.9,
+      "malformed_or_no_box_rate": 0.1,
+      "mean_iou": 0.10406170258818075,
+      "median_iou": 0.05946836744064425,
+      "strict_iou_gt_0_5_rate": 0.025,
+      "mean_semantic_reward": 0.01289810724556446,
+      "mean_total_reward": 0.9378981072455644,
+      "mean_normalized_box_area_among_valid": 0.6605307638888889,
+      "near_full_image_rate_all_samples": 0.3125,
+      "near_full_image_rate_among_valid": 0.3472222222222222,
+      "branch_distribution_counts": {
+        "pbd": 73,
+        "ntp_fallback": 1,
+        "none": 6
+      },
+      "branch_distribution_rates": {
+        "pbd": 0.9125,
+        "ntp_fallback": 0.0125,
+        "none": 0.075
+      },
+      "mean_generated_token_count": 17.5625,
+      "truncation_count": 0,
+      "per_sample_jsonl": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/all_checkpoints_internal_validation/step_050_per_sample.jsonl"
+    },
+    "step_075": {
+      "checkpoint": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_075.pt",
+      "n_samples": 80,
+      "valid_native_box_rate": 0.9625,
+      "malformed_or_no_box_rate": 0.0375,
+      "mean_iou": 0.1289115798892033,
+      "median_iou": 0.06678131378702286,
+      "strict_iou_gt_0_5_rate": 0.0625,
+      "mean_semantic_reward": 0.013274731929413974,
+      "mean_total_reward": 1.0382747319294139,
+      "mean_normalized_box_area_among_valid": 0.6667798181818181,
+      "near_full_image_rate_all_samples": 0.3375,
+      "near_full_image_rate_among_valid": 0.35064935064935066,
+      "branch_distribution_counts": {
+        "pbd": 76,
+        "ntp_fallback": 1,
+        "none": 3
+      },
+      "branch_distribution_rates": {
+        "pbd": 0.95,
+        "ntp_fallback": 0.0125,
+        "none": 0.0375
+      },
+      "mean_generated_token_count": 17.375,
+      "truncation_count": 0,
+      "per_sample_jsonl": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/all_checkpoints_internal_validation/step_075_per_sample.jsonl"
+    },
+    "step_100": {
+      "checkpoint": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_100.pt",
+      "n_samples": 80,
+      "valid_native_box_rate": 0.9625,
+      "malformed_or_no_box_rate": 0.0375,
+      "mean_iou": 0.11534677866180591,
+      "median_iou": 0.06181292615862065,
+      "strict_iou_gt_0_5_rate": 0.025,
+      "mean_semantic_reward": 0.01311197976465337,
+      "mean_total_reward": 1.0006119797646533,
+      "mean_normalized_box_area_among_valid": 0.7883978311688311,
+      "near_full_image_rate_all_samples": 0.5625,
+      "near_full_image_rate_among_valid": 0.5844155844155844,
+      "branch_distribution_counts": {
+        "pbd": 76,
+        "ntp_fallback": 1,
+        "none": 3
+      },
+      "branch_distribution_rates": {
+        "pbd": 0.95,
+        "ntp_fallback": 0.0125,
+        "none": 0.0375
+      },
+      "mean_generated_token_count": 17.6375,
+      "truncation_count": 0,
+      "per_sample_jsonl": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/step_100_isolated/step_100_per_sample.jsonl"
+    },
+    "step_125": {
+      "checkpoint": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_125.pt",
+      "n_samples": 80,
+      "valid_native_box_rate": 0.975,
+      "malformed_or_no_box_rate": 0.025,
+      "mean_iou": 0.15719587876928118,
+      "median_iou": 0.08615608802169528,
+      "strict_iou_gt_0_5_rate": 0.075,
+      "mean_semantic_reward": 0.0138137744856067,
+      "mean_total_reward": 1.0638137744856067,
+      "mean_normalized_box_area_among_valid": 0.5244733461538461,
+      "near_full_image_rate_all_samples": 0.1625,
+      "near_full_image_rate_among_valid": 0.16666666666666666,
+      "branch_distribution_counts": {
+        "pbd": 80,
+        "ntp_fallback": 0,
+        "none": 0
+      },
+      "branch_distribution_rates": {
+        "pbd": 1.0,
+        "ntp_fallback": 0.0,
+        "none": 0.0
+      },
+      "mean_generated_token_count": 17.4625,
+      "truncation_count": 0,
+      "per_sample_jsonl": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/step_125_isolated/step_125_per_sample.jsonl"
+    },
+    "step_150": {
+      "checkpoint": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_150.pt",
+      "n_samples": 80,
+      "valid_native_box_rate": 0.9875,
+      "malformed_or_no_box_rate": 0.0125,
+      "mean_iou": 0.15674357353347518,
+      "median_iou": 0.07855440391552043,
+      "strict_iou_gt_0_5_rate": 0.075,
+      "mean_semantic_reward": 0.013646865222835914,
+      "mean_total_reward": 1.0761468652228359,
+      "mean_normalized_box_area_among_valid": 0.551091746835443,
+      "near_full_image_rate_all_samples": 0.125,
+      "near_full_image_rate_among_valid": 0.12658227848101267,
+      "branch_distribution_counts": {
+        "pbd": 80,
+        "ntp_fallback": 0,
+        "none": 0
+      },
+      "branch_distribution_rates": {
+        "pbd": 1.0,
+        "ntp_fallback": 0.0,
+        "none": 0.0
+      },
+      "mean_generated_token_count": 17.5125,
+      "truncation_count": 0,
+      "per_sample_jsonl": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/step_150_isolated/step_150_per_sample.jsonl"
+    }
+  },
+  "paired_deltas_vs_frozen_base": {
+    "step_025": {
+      "mean_iou_delta": {
+        "point": 0.005685887840009592,
+        "ci95_low": -0.008149062694301264,
+        "ci95_high": 0.021206726473009117,
+        "replicates": 10000,
+        "seed": 20260810
+      },
+      "median_iou_delta": 0.025750630161366486,
+      "strict_iou_gt_0_5_rate_delta": -0.0125,
+      "valid_native_box_rate_delta": 0.2,
+      "near_full_image_rate_all_samples_delta": 0.05
+    },
+    "step_050": {
+      "mean_iou_delta": {
+        "point": 7.600856067950824e-05,
+        "ci95_low": -0.019764970562646124,
+        "ci95_high": 0.018064805654895818,
+        "replicates": 10000,
+        "seed": 20260811
+      },
+      "median_iou_delta": 0.01961162044044487,
+      "strict_iou_gt_0_5_rate_delta": 0.0,
+      "valid_native_box_rate_delta": 0.225,
+      "near_full_image_rate_all_samples_delta": 0.2
+    },
+    "step_075": {
+      "mean_iou_delta": {
+        "point": 0.024925885861702062,
+        "ci95_low": 0.0017598171102409614,
+        "ci95_high": 0.0461536725466684,
+        "replicates": 10000,
+        "seed": 20260812
+      },
+      "median_iou_delta": 0.02692456678682348,
+      "strict_iou_gt_0_5_rate_delta": 0.0375,
+      "valid_native_box_rate_delta": 0.2875,
+      "near_full_image_rate_all_samples_delta": 0.225
+    },
+    "step_100": {
+      "mean_iou_delta": {
+        "point": 0.011361084634304682,
+        "ci95_low": -0.010063374397585697,
+        "ci95_high": 0.03130861005921243,
+        "replicates": 10000,
+        "seed": 20260813
+      },
+      "median_iou_delta": 0.02195617915842127,
+      "strict_iou_gt_0_5_rate_delta": 0.0,
+      "valid_native_box_rate_delta": 0.2875,
+      "near_full_image_rate_all_samples_delta": 0.45
+    },
+    "step_125": {
+      "mean_iou_delta": {
+        "point": 0.05321018474177995,
+        "ci95_low": 0.024850968975487053,
+        "ci95_high": 0.08102943831874912,
+        "replicates": 10000,
+        "seed": 20260814
+      },
+      "median_iou_delta": 0.046299341021495896,
+      "strict_iou_gt_0_5_rate_delta": 0.05,
+      "valid_native_box_rate_delta": 0.3,
+      "near_full_image_rate_all_samples_delta": 0.05
+    },
+    "step_150": {
+      "mean_iou_delta": {
+        "point": 0.05275787950597392,
+        "ci95_low": 0.02430757853488356,
+        "ci95_high": 0.08088126180589232,
+        "replicates": 10000,
+        "seed": 20260815
+      },
+      "median_iou_delta": 0.03869765691532105,
+      "strict_iou_gt_0_5_rate_delta": 0.05,
+      "valid_native_box_rate_delta": 0.3125,
+      "near_full_image_rate_all_samples_delta": 0.0125
+    }
+  },
+  "selection": {
+    "primary_rule": "highest validation mean IoU",
+    "effective_tie_definition": "within 0.005 absolute mean IoU of the numerical best",
+    "tie_breakers": [
+      "higher strict IoU > 0.5 rate",
+      "lower near-full-image rate over all 80 samples",
+      "higher valid-native-box rate",
+      "earlier step"
+    ],
+    "valid_box_noncollapse_gate": "checkpoint valid-box rate >= frozen-base rate - 0.05",
+    "eligible_checkpoints": [
+      "step_025",
+      "step_050",
+      "step_075",
+      "step_100",
+      "step_125",
+      "step_150"
+    ],
+    "effectively_tied_checkpoints": [
+      "step_125",
+      "step_150"
+    ],
+    "numerical_best_mean_iou": 0.15719587876928118,
+    "selected_label": "step_150",
+    "selected_checkpoint": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_150.pt",
+    "selected_verdict_vs_frozen_base": "localization improved"
+  },
+  "step100_stopping_rule": {
+    "rule": "if step100 mean IoU has not improved over frozen base, flag unlikely to benefit from continuing to 500",
+    "frozen_base_mean_iou": 0.10398569402750124,
+    "step100_mean_iou": 0.11534677866180591,
+    "step100_delta": 0.011361084634304672,
+    "step100_improved_strictly": true,
+    "flag_unlikely_to_benefit_from_continuing_to_500": false,
+    "continuing_beyond_150_justified_by_step100_rule": true,
+    "automatic_action": "none"
+  },
+  "concise_verdict": "localization improved",
+  "evaluation_commands": [
+    "tcsh -f -c 'setenv CUDA_VISIBLE_DEVICES 0,1; setenv PYTHONUNBUFFERED 1; /auto/k2/ykorkmaz/envs/miniconda3/envs/locateanything/bin/python Embodied/evaluation/chestxray8/eval_two_gpu_hybrid_grpo_checkpoints.py --config Embodied/evaluation/chestxray8/rl/chestxray8_grpo_hybrid_native_g8_caseb_150.yaml --output-dir Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/all_checkpoints_internal_validation --manifest Embodied/evaluation/chestxray8/splits/production_train90_validation10_seed42/validation10_of_train80_seed42.jsonl --manifest-sha256 f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838 --split-label internal_validation --condition frozen_base=base --condition step_025=Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_025.pt --condition step_050=Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_050.pt --condition step_075=Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_075.pt --condition step_100=Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_100.pt --condition step_125=Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_125.pt --condition step_150=Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_150.pt --bootstrap-replicates 2000 --bootstrap-seed 20260810'",
+    "tcsh -f -c 'setenv CUDA_VISIBLE_DEVICES 0,1; setenv PYTHONUNBUFFERED 1; /auto/k2/ykorkmaz/envs/miniconda3/envs/locateanything/bin/python Embodied/evaluation/chestxray8/eval_two_gpu_hybrid_grpo_checkpoints.py --config Embodied/evaluation/chestxray8/rl/chestxray8_grpo_hybrid_native_g8_caseb_150.yaml --output-dir Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/step_100_isolated --manifest Embodied/evaluation/chestxray8/splits/production_train90_validation10_seed42/validation10_of_train80_seed42.jsonl --manifest-sha256 f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838 --split-label internal_validation --condition step_100=Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_100.pt --bootstrap-replicates 2000 --bootstrap-seed 20260810'",
+    "tcsh -f -c 'setenv CUDA_VISIBLE_DEVICES 0,1; setenv PYTHONUNBUFFERED 1; /auto/k2/ykorkmaz/envs/miniconda3/envs/locateanything/bin/python Embodied/evaluation/chestxray8/eval_two_gpu_hybrid_grpo_checkpoints.py --config Embodied/evaluation/chestxray8/rl/chestxray8_grpo_hybrid_native_g8_caseb_150.yaml --output-dir Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/step_125_isolated --manifest Embodied/evaluation/chestxray8/splits/production_train90_validation10_seed42/validation10_of_train80_seed42.jsonl --manifest-sha256 f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838 --split-label internal_validation --condition step_125=Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_125.pt --bootstrap-replicates 2000 --bootstrap-seed 20260810'",
+    "tcsh -f -c 'setenv CUDA_VISIBLE_DEVICES 0,1; setenv PYTHONUNBUFFERED 1; /auto/k2/ykorkmaz/envs/miniconda3/envs/locateanything/bin/python Embodied/evaluation/chestxray8/eval_two_gpu_hybrid_grpo_checkpoints.py --config Embodied/evaluation/chestxray8/rl/chestxray8_grpo_hybrid_native_g8_caseb_150.yaml --output-dir Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/step_150_isolated --manifest Embodied/evaluation/chestxray8/splits/production_train90_validation10_seed42/validation10_of_train80_seed42.jsonl --manifest-sha256 f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838 --split-label internal_validation --condition step_150=Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_g8_caseb_150_optimization710_seed42/two_gpu_g8_caseb_step_150.pt --bootstrap-replicates 2000 --bootstrap-seed 20260810'"
+  ],
+  "assembly_command": "Embodied/evaluation/chestxray8/assemble_g8_caseb_validation_conditions.py --partial-output-dir Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/all_checkpoints_internal_validation --step100-aggregate Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/step_100_isolated/aggregate_metrics.json --step125-aggregate Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/step_125_isolated/aggregate_metrics.json --step150-aggregate Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/step_150_isolated/aggregate_metrics.json --bootstrap-replicates 2000 --bootstrap-seed 20260810",
+  "summarizer_command": "Embodied/evaluation/chestxray8/summarize_g8_caseb_validation.py --evaluation-aggregate Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/all_checkpoints_internal_validation/aggregate_metrics.json --output-dir Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/validation/g8_caseb_150_optimization710_seed42/all_checkpoints_internal_validation"
+}

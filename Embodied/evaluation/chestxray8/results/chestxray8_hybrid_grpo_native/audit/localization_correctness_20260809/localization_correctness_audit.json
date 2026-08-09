@@ -1,0 +1,184 @@
+{
+  "audit_format": "chestxray8_localization_correctness_audit_v1",
+  "binary_verdict": "localization pipeline correct",
+  "prohibited_actions": {
+    "training_run": false,
+    "new_model_inference": false,
+    "heldout_prediction_evaluation": false
+  },
+  "source_coordinate_convention": {
+    "csv_fields": [
+      "image_index",
+      "finding_label",
+      "x",
+      "y",
+      "width",
+      "height"
+    ],
+    "label_alias": {
+      "Infiltrate": "Infiltration"
+    },
+    "origin": "top-left",
+    "conversion": "[x, y, x+width, y+height] -> round([x/W,y/H,x2/W,y2/H]*1000)",
+    "normalized_domain": "continuous image-edge coordinates in inclusive numeric range [0,1000]",
+    "right_bottom_full_image_boundary": 1000,
+    "resize_or_padding_offsets_in_gt_transform": "none",
+    "dimension_source": "PIL Image.open(image_path).size persisted as image_width,image_height"
+  },
+  "preprocessing_geometry": {
+    "model_processor": "LocateAnythingImageProcessor.rescale",
+    "initial_token_limit_scaling": "uniform width/height scale (aspect ratio preserved)",
+    "patch_multiple_adjustment": "width and height resized independently up to multiples of 28",
+    "padding_operation": false,
+    "padding_offsets": [
+      0,
+      0
+    ],
+    "why_no_gt_remap_is_needed": "predictions and GT are both normalized fractions; IoU is invariant to independent positive x/y scaling, and the processor introduces no translated coordinate origin",
+    "dataset_dimensions_verified_from": "Pillow image files, not processor tensors",
+    "width_height_swap_detected": false
+  },
+  "oracle_tests": {
+    "path": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/test_localization_correctness_audit.py",
+    "passed": 7,
+    "failed": 0,
+    "checks": [
+      "exact transformed GT gives IoU 1",
+      "exact transformed GT gives spatial reward 1",
+      "pixel-normalized-pixel roundtrip within half normalized unit",
+      "asymmetric 1600x900 xy/order/no-width-height-swap oracle",
+      "1000 full boundary and 999 one normalized unit inside",
+      "IoU invariance under independent axis scaling",
+      "training and evaluator import the same reward/IoU objects"
+    ]
+  },
+  "train_evaluator_reward_path": {
+    "training_call": "rewards.score_from_trace(trace, pair)",
+    "evaluation_call": "rewards.score_from_trace(trace, pair)",
+    "shared_factory": "rl.rewards.build_reward_pipeline_from_config",
+    "shared_iou": "eval_locateanything_bbox.box_iou imported by rl.rewards",
+    "shared_gt_field": "pair['gt_boxes_norm_1000']",
+    "spatial_threshold": 0.5,
+    "spatial_comparison": "strict greater_than"
+  },
+  "manifests": {
+    "train80": {
+      "path": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/train80_pairs_seed42.jsonl",
+      "sha256": "a2b1c25f652f90e8d93e58b33ee74aa5eb09db4df7c6b37e760f5e5238c2e3b0",
+      "row_count": 790,
+      "opened_images_for_dimensions": true,
+      "max_roundtrip_absolute_error_pixels": {
+        "x_pixels": 0.5119930555559904,
+        "y_pixels": 0.5092910052910611
+      },
+      "failure_count": 0,
+      "failures": []
+    },
+    "heldout_test_metadata_only": {
+      "path": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/test_pairs_seed42.jsonl",
+      "sha256": "783965de02032ad44cc387afa22cd2382649330a0f5f39e0caf5a62d3385a2ed",
+      "row_count": 194,
+      "opened_images_for_dimensions": true,
+      "max_roundtrip_absolute_error_pixels": {
+        "x_pixels": 0.5119930555550809,
+        "y_pixels": 0.5092910052910611
+      },
+      "failure_count": 0,
+      "failures": []
+    },
+    "optimization": {
+      "path": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/production_train90_validation10_seed42/optimization90_of_train80_seed42.jsonl",
+      "sha256": "4edbed2071e4010c83c45ce8d33d341e0813fba2276150c82c990f1c7e9822f6",
+      "row_count": 710,
+      "opened_images_for_dimensions": false,
+      "max_roundtrip_absolute_error_pixels": {
+        "x_pixels": 0.5119930555559904,
+        "y_pixels": 0.5092910052910611
+      },
+      "failure_count": 0,
+      "failures": []
+    },
+    "internal_validation": {
+      "path": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/splits/production_train90_validation10_seed42/validation10_of_train80_seed42.jsonl",
+      "sha256": "f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838",
+      "row_count": 80,
+      "opened_images_for_dimensions": false,
+      "max_roundtrip_absolute_error_pixels": {
+        "x_pixels": 0.5092910052910042,
+        "y_pixels": 0.503873015872955
+      },
+      "failure_count": 0,
+      "failures": []
+    }
+  },
+  "partition_alignment": {
+    "optimization_union_validation_equals_train80": true,
+    "optimization_intersection_validation_empty": true,
+    "train80_intersection_heldout_test_empty": true,
+    "recorded_patient_overlap": {
+      "optimization_test": false,
+      "optimization_validation": false,
+      "validation_test": false
+    },
+    "all_recorded_patient_overlaps_false": true,
+    "hashes_match_split_manifest": {
+      "train80": true,
+      "heldout_test": true,
+      "optimization": true,
+      "internal_validation": true
+    }
+  },
+  "kl_free_saved_raw_iou": {
+    "source": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/training/two_gpu_18x18_production_500_train80_seed42_revalidated_20260808/two_gpu_g4_grpo_multistep_metrics.jsonl",
+    "source_sha256": "1c4827643d00921ce34305cac23c9672ca4f2cfffdd860b99ef729eb0cbc23da",
+    "completed_group_count": 578,
+    "first_50": {
+      "group_count": 50,
+      "trajectory_count": 200,
+      "raw_iou_min": 0.0,
+      "raw_iou_q25": 0.0,
+      "raw_iou_median": 0.01959520644124447,
+      "raw_iou_q75": 0.12178366115441752,
+      "raw_iou_max": 0.3330738193000231,
+      "raw_iou_mean": 0.07131260855833299,
+      "trajectories_iou_gt_0_5": 0,
+      "groups_with_nonzero_raw_iou_variance": 48,
+      "groups_with_nonzero_binary_spatial_variance": 0,
+      "all_binary_spatial_zero_groups": 50,
+      "csv": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/audit/localization_correctness_20260809/first50_klfree_raw_ious.csv"
+    },
+    "all_completed_groups": {
+      "groups_with_nonzero_raw_iou_variance": 496,
+      "groups_with_nonzero_binary_spatial_variance": 0,
+      "all_binary_spatial_zero_groups": 577,
+      "all_binary_spatial_one_groups": 1,
+      "trajectory_count": 2312,
+      "trajectories_iou_gt_0_5": 4
+    }
+  },
+  "diagnostic_overlays": {
+    "count": 20,
+    "optimization_train_count": 10,
+    "internal_validation_count": 10,
+    "saved_base_prediction_count": 8,
+    "heldout_test_count": 0,
+    "saved_base_source": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/audit/fresh_start_regression_seed42/eight_group_rollout_only_probe.json",
+    "saved_base_source_sha256": "b7caec27d60ae5fc5cf26199d97b93a3bfaf1d4ccc8f7887a9c83056d891add7",
+    "manifest": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/audit/localization_correctness_20260809/overlay_manifest.json",
+    "directory": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/audit/localization_correctness_20260809/overlays"
+  },
+  "existing_base_heldout_context_not_rerun": {
+    "source": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/results/chestxray8_hybrid_grpo_native/evaluation/final_step500_heldout_test_seed42_20260808_v3/base_aggregate.json",
+    "n_samples": 194,
+    "iou_gt_0_5_accuracy": 0.020618556701030927,
+    "success_count": 4,
+    "interpretation": "nonzero marginal success on different held-out examples does not imply mixed success/failure among four trajectories for the same training example"
+  },
+  "g8_probe": {
+    "prepared": true,
+    "run": false,
+    "static_contract_validation_passed": true,
+    "config": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/rl/chestxray8_grpo_hybrid_native_g8_lora_only_probe.yaml",
+    "launcher": "/auto/k2/ykorkmaz/LocateAnything-playground/Embodied/evaluation/chestxray8/two_gpu_g8_one_update_memory_probe.py"
+  }
+}

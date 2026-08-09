@@ -1,18 +1,27 @@
-"""Production Chain-of-Box rewards for reward-only ChestX-ray8 GRPO."""
+"""Production rewards for reward-only ChestX-ray8 GRPO.
+
+Format validity and bbox reward extraction are separate:
+
+- ``R_format`` evaluates whether the final emitted completion satisfies the
+  required grammar (Chain-of-Box or native LocateAnything).
+- ``R_spatial`` / ``R_semantic`` consume the decoder's single committed final
+  bbox (from ``RolloutTrace``), never an arbitrary BOX_RE match mined from a
+  malformed completion and never a rejected / intermediate proposal.
+"""
 
 from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from eval_locateanything_bbox import box_iou
+from eval_locateanything_bbox import BOX_RE, box_iou
 from rl.medclip_loader import load_pinned_medclip
 
 NATIVE_BOX_PATTERN = re.compile(
@@ -23,11 +32,17 @@ OUTER_PATTERN = re.compile(
     r"<answer>(?P<answer>.*?)</answer>",
     re.DOTALL,
 )
-# Generation may append chat/eos markers after a valid </answer>. Strip only
+# Generation may append chat/eos markers after a valid completion. Strip only
 # trailing special tokens for reward parsing; do not rewrite box content.
 _TRAILING_SPECIAL = re.compile(
     r"(?:\s|<\|im_end\|>|<\|endoftext\|>|<\|im_start\|>)+$"
 )
+
+PARSER_CHAIN_OF_BOX = "chain_of_box"
+PARSER_NATIVE = "native_locateanything"
+VALID_PARSERS = (PARSER_CHAIN_OF_BOX, PARSER_NATIVE)
+
+Box = Tuple[int, int, int, int]
 
 
 def normalize_completion_for_reward(text: str) -> str:
@@ -37,7 +52,7 @@ def normalize_completion_for_reward(text: str) -> str:
 @dataclass(frozen=True)
 class ParsedCompletion:
     format_valid: bool
-    final_box_norm_1000: Optional[Tuple[int, int, int, int]]
+    final_box_norm_1000: Optional[Box]
     think_text: Optional[str]
     error: Optional[str]
 
@@ -51,8 +66,10 @@ class RewardComponents:
     final_iou: float
     format_valid: bool
     geometry_valid: bool
-    final_box_norm_1000: Optional[Tuple[int, int, int, int]]
+    final_box_norm_1000: Optional[Box]
     parse_error: Optional[str]
+    reward_branch: Optional[str] = None
+    has_unambiguous_committed_box: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -67,17 +84,17 @@ class SemanticScorer(Protocol):
     ) -> float: ...
 
 
-def _native_boxes(text: str) -> list[Tuple[int, int, int, int]]:
+def _native_boxes(text: str) -> list[Box]:
     boxes = []
     for match in NATIVE_BOX_PATTERN.finditer(text):
         box = tuple(int(value) for value in match.groups())
         if all(0 <= value <= 1000 for value in box):
-            boxes.append(box)
+            boxes.append(box)  # type: ignore[arg-type]
     return boxes
 
 
 def parse_chain_of_box_completion(text: str) -> ParsedCompletion:
-    """Extract only the final answer box; never use intermediate boxes."""
+    """Format + answer-box parse for Chain-of-Box completions."""
     if not isinstance(text, str):
         return ParsedCompletion(False, None, None, "completion is not text")
     text = normalize_completion_for_reward(text)
@@ -97,7 +114,59 @@ def parse_chain_of_box_completion(text: str) -> ParsedCompletion:
         return ParsedCompletion(False, None, think, "malformed intermediate box")
     if think.count("</box>") != len(valid_think_boxes):
         return ParsedCompletion(False, None, think, "malformed intermediate box")
-    return ParsedCompletion(True, final_box, think, None)
+    return ParsedCompletion(True, final_box, think, None)  # type: ignore[arg-type]
+
+
+def parse_native_locateanything_completion(text: str) -> ParsedCompletion:
+    """Evaluate native LocateAnything *format* grammar on emitted text.
+
+    This does **not** supply the spatial/semantic box for native PBD/Hybrid
+    GRPO. Those rewards consume the decoder-committed final bbox from the
+    rollout trace. The optional ``final_box_norm_1000`` here is retained only
+    for format diagnostics and Chain-of-Box-style legacy callers.
+    """
+    if not isinstance(text, str):
+        return ParsedCompletion(False, None, None, "completion is not text")
+    text = normalize_completion_for_reward(text)
+    matches = list(BOX_RE.finditer(text))
+    if text.count("<box>") != len(matches) or text.count("</box>") != len(matches):
+        return ParsedCompletion(False, None, None, "malformed native box")
+    if not matches:
+        return ParsedCompletion(False, None, None, "no native box")
+    boxes: list[Box] = []
+    for match in matches:
+        box = tuple(int(value) for value in match.groups())
+        if not all(0 <= value <= 1000 for value in box):
+            return ParsedCompletion(
+                False, None, None, "coordinate outside [0, 1000]"
+            )
+        boxes.append(box)  # type: ignore[arg-type]
+    if len(boxes) != 1:
+        return ParsedCompletion(
+            False,
+            None,
+            None,
+            "expected exactly one native box for single-object task",
+        )
+    final_box = boxes[0]
+    if not is_valid_geometry(final_box):
+        return ParsedCompletion(False, None, None, "invalid geometry")
+    return ParsedCompletion(True, final_box, None, None)
+
+
+COMPLETION_PARSERS: Dict[str, Callable[[str], ParsedCompletion]] = {
+    PARSER_CHAIN_OF_BOX: parse_chain_of_box_completion,
+    PARSER_NATIVE: parse_native_locateanything_completion,
+}
+
+
+def resolve_parser_name(config: Optional[Dict[str, Any]] = None) -> str:
+    if config is None:
+        return PARSER_CHAIN_OF_BOX
+    name = config.get("rewards", {}).get("parser", PARSER_CHAIN_OF_BOX)
+    if name not in COMPLETION_PARSERS:
+        raise ValueError(f"unsupported rewards.parser={name!r}")
+    return name
 
 
 def is_valid_geometry(box: Sequence[int]) -> bool:
@@ -105,8 +174,29 @@ def is_valid_geometry(box: Sequence[int]) -> bool:
     return x2 > x1 and y2 > y1
 
 
-def format_reward(completion: str) -> float:
-    return float(parse_chain_of_box_completion(completion).format_valid)
+def format_reward(
+    completion: str,
+    *,
+    parser_name: str = PARSER_CHAIN_OF_BOX,
+) -> float:
+    parser = COMPLETION_PARSERS[parser_name]
+    return float(parser(completion).format_valid)
+
+
+def spatial_reward_from_box(
+    box: Optional[Sequence[int]],
+    gt_boxes_norm_1000: Sequence[Sequence[float]],
+    *,
+    threshold: float = 0.5,
+) -> Tuple[float, float]:
+    """MedGround-R1 spatial reward on one committed final box."""
+    if box is None or not is_valid_geometry(box):
+        return 0.0, 0.0
+    best_iou = max(
+        (box_iou(box, gt_box) for gt_box in gt_boxes_norm_1000),
+        default=0.0,
+    )
+    return float(best_iou > threshold), float(best_iou)
 
 
 def spatial_reward(
@@ -114,22 +204,28 @@ def spatial_reward(
     gt_boxes_norm_1000: Sequence[Sequence[float]],
     *,
     threshold: float = 0.5,
+    parser_name: str = PARSER_CHAIN_OF_BOX,
+    committed_final_box: Optional[Sequence[int]] = None,
 ) -> Tuple[float, float]:
-    parsed = parse_chain_of_box_completion(completion)
+    """Spatial reward; prefers an explicit decoder-committed box when given."""
+    if committed_final_box is not None:
+        return spatial_reward_from_box(
+            committed_final_box,
+            gt_boxes_norm_1000,
+            threshold=threshold,
+        )
+    parsed = COMPLETION_PARSERS[parser_name](completion)
     if (
         not parsed.format_valid
         or parsed.final_box_norm_1000 is None
         or not is_valid_geometry(parsed.final_box_norm_1000)
     ):
         return 0.0, 0.0
-    best_iou = max(
-        (
-            box_iou(parsed.final_box_norm_1000, gt_box)
-            for gt_box in gt_boxes_norm_1000
-        ),
-        default=0.0,
+    return spatial_reward_from_box(
+        parsed.final_box_norm_1000,
+        gt_boxes_norm_1000,
+        threshold=threshold,
     )
-    return float(best_iou > threshold), float(best_iou)
 
 
 class MedCLIPSemanticScorer:
@@ -201,30 +297,80 @@ class ProductionRewardPipeline:
         spatial_weight: float = 1.0,
         semantic_weight: float = 1.0,
         iou_threshold: float = 0.5,
+        parser_name: str = PARSER_CHAIN_OF_BOX,
+        invalid_box_semantic_fallback: float = 0.0,
     ) -> None:
+        if parser_name not in COMPLETION_PARSERS:
+            raise ValueError(f"unsupported parser_name={parser_name!r}")
         self.semantic_scorer = semantic_scorer
         self.format_weight = float(format_weight)
         self.spatial_weight = float(spatial_weight)
         self.semantic_weight = float(semantic_weight)
         self.iou_threshold = float(iou_threshold)
+        self.parser_name = parser_name
+        self.parse = COMPLETION_PARSERS[parser_name]
+        self.invalid_box_semantic_fallback = float(invalid_box_semantic_fallback)
 
-    def score(self, completion: str, pair: Dict[str, Any]) -> RewardComponents:
-        parsed = parse_chain_of_box_completion(completion)
+    def score(
+        self,
+        completion: str,
+        pair: Dict[str, Any],
+        *,
+        committed_final_box: Optional[Sequence[int]] = None,
+        has_unambiguous_committed_box: Optional[bool] = None,
+        reward_branch: Optional[str] = None,
+    ) -> RewardComponents:
+        """Score format from text and spatial/semantic from the committed box.
+
+        Native PBD/Hybrid callers should pass the decoder-committed box from
+        ``RolloutTrace``. When ``has_unambiguous_committed_box`` is False,
+        spatial=0, semantic=fallback, and format=0.
+
+        Legacy Chain-of-Box callers may omit committed-box fields; the answer
+        box from the CoB parser is then used as the committed final box.
+        """
+        parsed = self.parse(completion)
+
+        if has_unambiguous_committed_box is None:
+            # Legacy / CoB path: parser answer box is the committed action.
+            if parsed.format_valid and parsed.final_box_norm_1000 is not None:
+                has_unambiguous_committed_box = True
+                if committed_final_box is None:
+                    committed_final_box = parsed.final_box_norm_1000
+            else:
+                has_unambiguous_committed_box = False
+                committed_final_box = None
+
+        if not has_unambiguous_committed_box or committed_final_box is None:
+            return RewardComponents(
+                format_reward=0.0,
+                spatial_reward=0.0,
+                semantic_reward=float(self.invalid_box_semantic_fallback),
+                total_reward=float(
+                    self.semantic_weight * self.invalid_box_semantic_fallback
+                ),
+                final_iou=0.0,
+                format_valid=False,
+                geometry_valid=False,
+                final_box_norm_1000=None,
+                parse_error=parsed.error or "no unambiguous committed final box",
+                reward_branch=reward_branch or "none",
+                has_unambiguous_committed_box=False,
+            )
+
+        box: Box = tuple(int(v) for v in committed_final_box)  # type: ignore[assignment]
         fmt = float(parsed.format_valid)
-        spatial, iou = spatial_reward(
-            completion,
+        spatial, iou = spatial_reward_from_box(
+            box,
             pair["gt_boxes_norm_1000"],
             threshold=self.iou_threshold,
         )
-        geometry_valid = bool(
-            parsed.final_box_norm_1000 is not None
-            and is_valid_geometry(parsed.final_box_norm_1000)
-        )
-        semantic = 0.0
-        if parsed.format_valid and geometry_valid:
+        geometry_valid = bool(is_valid_geometry(box))
+        semantic = self.invalid_box_semantic_fallback
+        if geometry_valid:
             semantic = self.semantic_scorer.score(
                 pair["image_path"],
-                parsed.final_box_norm_1000,
+                box,
                 pair["user_query"],
             )
         total = (
@@ -240,6 +386,46 @@ class ProductionRewardPipeline:
             final_iou=iou,
             format_valid=parsed.format_valid,
             geometry_valid=geometry_valid,
-            final_box_norm_1000=parsed.final_box_norm_1000,
+            final_box_norm_1000=box,
             parse_error=parsed.error,
+            reward_branch=reward_branch,
+            has_unambiguous_committed_box=True,
         )
+
+    def score_from_trace(
+        self,
+        trace: Any,
+        pair: Dict[str, Any],
+    ) -> RewardComponents:
+        """Score using the decoder-committed final bbox on ``RolloutTrace``."""
+        return self.score(
+            trace.decoded_text or "",
+            pair,
+            committed_final_box=getattr(
+                trace, "committed_final_box_norm_1000", None
+            ),
+            has_unambiguous_committed_box=bool(
+                getattr(trace, "has_unambiguous_committed_box", False)
+            ),
+            reward_branch=getattr(trace, "reward_branch", None),
+        )
+
+
+def build_reward_pipeline_from_config(
+    config: Dict[str, Any],
+    semantic_scorer: SemanticScorer,
+) -> ProductionRewardPipeline:
+    reward_cfg = config["rewards"]
+    parser_name = resolve_parser_name(config)
+    invalid_fallback = float(
+        reward_cfg.get("semantic", {}).get("invalid_box_fallback", 0.0)
+    )
+    return ProductionRewardPipeline(
+        semantic_scorer,
+        format_weight=float(reward_cfg["format"]["weight"]),
+        spatial_weight=float(reward_cfg["spatial"]["weight"]),
+        semantic_weight=float(reward_cfg["semantic"]["weight"]),
+        iou_threshold=float(reward_cfg["spatial"]["iou_threshold"]),
+        parser_name=parser_name,
+        invalid_box_semantic_fallback=invalid_fallback,
+    )

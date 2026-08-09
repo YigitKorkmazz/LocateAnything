@@ -19,10 +19,11 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from eval_locateanything_bbox import box_iou  # noqa: E402
 from rl.pbd_rl import StochasticPBDRLDecoder  # noqa: E402
-from rl.prompt import build_chain_of_box_prompt  # noqa: E402
+from rl.prompt import build_rl_user_text, resolve_prompt_mode  # noqa: E402
 from rl.rewards import (  # noqa: E402
+    COMPLETION_PARSERS,
     is_valid_geometry,
-    parse_chain_of_box_completion,
+    resolve_parser_name,
 )
 from rl.runtime import (  # noqa: E402
     DEFAULT_CONFIG,
@@ -101,8 +102,12 @@ def load_eval_policy(config: Dict[str, Any], checkpoint: Optional[str], device: 
     return model, tokenizer, processor, revision
 
 
-def final_box_from_text(text: str) -> Optional[Tuple[int, int, int, int]]:
-    parsed = parse_chain_of_box_completion(text)
+def final_box_from_text(
+    text: str,
+    *,
+    parser_name: str = "chain_of_box",
+) -> Optional[Tuple[int, int, int, int]]:
+    parsed = COMPLETION_PARSERS[parser_name](text)
     if not parsed.format_valid or parsed.final_box_norm_1000 is None:
         return None
     if not is_valid_geometry(parsed.final_box_norm_1000):
@@ -164,7 +169,7 @@ def evaluate_rl_native(
     )
     rows = []
     for index, pair in enumerate(pairs):
-        inputs = tokenize_rl_pair(processor, pair, device)
+        inputs = tokenize_rl_pair(processor, pair, device, config=config)
         trace = decoder.generate(
             input_ids=inputs["input_ids"],
             pixel_values=inputs["pixel_values"],
@@ -173,7 +178,10 @@ def evaluate_rl_native(
             seed=int(config["evaluation"]["seed"]) + index,
             force_first_box_block=False,
         )
-        pred = final_box_from_text(trace.decoded_text or "")
+        pred = final_box_from_text(
+            trace.decoded_text or "",
+            parser_name=resolve_parser_name(config),
+        )
         metrics = pair_metrics(pred, pair["gt_boxes_norm_1000"])
         rows.append(
             {
@@ -213,7 +221,9 @@ def evaluate_ordinary_mode(
                     {"type": "image", "image": image},
                     {
                         "type": "text",
-                        "text": build_chain_of_box_prompt(pair["user_query"]),
+                        "text": build_rl_user_text(
+                            pair, prompt_mode=resolve_prompt_mode(config)
+                        ),
                     },
                 ],
             }
@@ -244,7 +254,9 @@ def evaluate_ordinary_mode(
             response[0, inputs["input_ids"].shape[1] :],
             skip_special_tokens=False,
         )
-        pred = final_box_from_text(answer)
+        pred = final_box_from_text(
+            answer, parser_name=resolve_parser_name(config)
+        )
         metrics = pair_metrics(pred, pair["gt_boxes_norm_1000"])
         rows.append(
             {
