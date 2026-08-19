@@ -26,6 +26,7 @@ from rl.pbd_rl import (
     RolloutTrace,
     StochasticPBDRLDecoder,
 )
+from rl.ntp_rl import NTPRolloutReplayer, StochasticNTPRLDecoder
 from rl.prompt import VALID_PROMPT_MODES, build_rl_messages, resolve_prompt_mode
 from rl.rewards import VALID_PARSERS, resolve_parser_name
 from sft_common import LLM_LORA_TARGET_MODULES, read_jsonl
@@ -53,10 +54,12 @@ VALID_LOSS_TOTALS = ("L_GRPO", "L_GRPO_PLUS_MEDGROUND_KL")
 
 ROLLOUT_PATH_PBD = "stochastic_native_pbd_rl"
 ROLLOUT_PATH_HYBRID = "stochastic_native_hybrid_rl"
+ROLLOUT_PATH_NTP_ONLY = "stochastic_native_ntp_rl"
 # Legacy CoB YAML may omit path or use an older alias.
 VALID_ROLLOUT_PATHS = (
     ROLLOUT_PATH_PBD,
     ROLLOUT_PATH_HYBRID,
+    ROLLOUT_PATH_NTP_ONLY,
     "stochastic_pbd_rl",
 )
 
@@ -120,6 +123,28 @@ def load_resolved_config(path: str | Path = DEFAULT_CONFIG) -> Dict[str, Any]:
             raise RuntimeError(
                 "Hybrid GRPO forbids reconstruct_actions_from_text"
             )
+    if rollout_path == ROLLOUT_PATH_NTP_ONLY:
+        ntp_cfg = config["rollout"].get("ntp_only") or {}
+        expected = {
+            "enabled": True,
+            "generation_mode": "slow",
+            "pbd_enabled": False,
+            "mtp_enabled": False,
+            "hybrid_fallback_enabled": False,
+            "rejected_proposal_trajectory_enabled": False,
+        }
+        if ntp_cfg != expected:
+            raise RuntimeError(
+                "NTP-only rollout contract mismatch: "
+                + json.dumps({"expected": expected, "actual": ntp_cfg}, sort_keys=True)
+            )
+        hybrid_cfg = config["rollout"].get("hybrid") or {}
+        if bool(hybrid_cfg.get("enabled", False)):
+            raise RuntimeError("NTP-only rollout requires Hybrid decoding disabled")
+        if bool(hybrid_cfg.get("score_rejected_pbd_proposals", False)):
+            raise RuntimeError("NTP-only rollout forbids rejected PBD proposal scoring")
+        if bool(config["rollout"].get("reconstruct_actions_from_text")):
+            raise RuntimeError("NTP-only GRPO replays decoder-native token actions")
     config["_config_path"] = str(config_path)
     return config
 
@@ -135,6 +160,10 @@ def is_hybrid_rollout(config: Dict[str, Any]) -> bool:
     return resolve_rollout_path(config) == ROLLOUT_PATH_HYBRID
 
 
+def is_ntp_only_rollout(config: Dict[str, Any]) -> bool:
+    return resolve_rollout_path(config) == ROLLOUT_PATH_NTP_ONLY
+
+
 def hybrid_logprob_objective(config: Dict[str, Any]) -> str:
     hybrid_cfg = config.get("rollout", {}).get("hybrid") or {}
     return resolve_logprob_objective(
@@ -143,6 +172,8 @@ def hybrid_logprob_objective(config: Dict[str, Any]) -> str:
 
 
 def build_rollout_replayer(model, tokenizer, config: Dict[str, Any]):
+    if is_ntp_only_rollout(config):
+        return NTPRolloutReplayer(model, tokenizer)
     if is_hybrid_rollout(config):
         return HybridRolloutReplayer(
             model,
@@ -150,6 +181,32 @@ def build_rollout_replayer(model, tokenizer, config: Dict[str, Any]):
             logprob_objective=hybrid_logprob_objective(config),
         )
     return PBDRolloutReplayer(model, tokenizer)
+
+
+def build_rollout_decoder(
+    model,
+    tokenizer,
+    config: Dict[str, Any],
+    *,
+    diagnostic_observer: Optional[Callable[[Dict[str, Any]], None]] = None,
+):
+    sampling = sampling_from_config(config)
+    if is_ntp_only_rollout(config):
+        return StochasticNTPRLDecoder(
+            model,
+            tokenizer,
+            sampling=sampling,
+            diagnostic_observer=diagnostic_observer,
+        )
+    if is_hybrid_rollout(config):
+        return StochasticHybridRLDecoder(
+            model,
+            tokenizer,
+            sampling=sampling,
+            logprob_objective=hybrid_logprob_objective(config),
+            diagnostic_observer=diagnostic_observer,
+        )
+    return StochasticPBDRLDecoder(model, tokenizer, sampling=sampling)
 
 
 def resolve_data_path(value: str) -> Path:
@@ -324,17 +381,12 @@ def generate_rollout_group(
     diagnostic_observer: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> List[RolloutTrace]:
     group_size = int(config["objective"]["group_size"])
-    sampling = sampling_from_config(config)
-    if is_hybrid_rollout(config):
-        decoder = StochasticHybridRLDecoder(
-            model,
-            tokenizer,
-            sampling=sampling,
-            logprob_objective=hybrid_logprob_objective(config),
-            diagnostic_observer=diagnostic_observer,
-        )
-    else:
-        decoder = StochasticPBDRLDecoder(model, tokenizer, sampling=sampling)
+    decoder = build_rollout_decoder(
+        model,
+        tokenizer,
+        config,
+        diagnostic_observer=diagnostic_observer,
+    )
     traces = []
     for group_index in range(group_size):
         # The sharded decoder consumes this only for pre-RoPE failure reports.

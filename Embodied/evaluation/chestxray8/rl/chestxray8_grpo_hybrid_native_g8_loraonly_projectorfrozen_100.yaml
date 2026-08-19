@@ -1,0 +1,63 @@
+# G=8 KL-free LoRA-only projector-frozen diagnostic ablation.
+# Consumed by two_gpu_g8_loraonly_projectorfrozen_production.py. Every field
+# not listed in overrides is inherited unchanged from the validated Hybrid
+# native configuration.
+base_config: chestxray8_grpo_hybrid_native.yaml
+
+experiment_contract:
+  status: prepared_do_not_run_automatically
+  run_name: G8_KL0_LORAONLY_PROJECTORFROZEN
+  optimizer_update_limit: 100
+  validation_steps: [0, 25, 50, 75, 100]
+  heldout_test_role: forbidden_for_model_selection
+
+overrides:
+  experiment: G8_KL0_LORAONLY_PROJECTORFROZEN
+  hardware:
+    required_gpu_name_substring: RTX 3090
+    visible_gpu_count: 2
+    decoder_layer_split: [18, 18]
+  model:
+    projector_trainable: false
+  objective:
+    loss_total: L_GRPO
+    group_size: 8
+    reference_kl:
+      enabled: false
+  policy_state:
+    synchronized_parameters: [lora]
+    reference_projector: frozen_pretrained_state
+  data:
+    train_split: splits/production_train90_validation10_seed42/optimization90_of_train80_seed42.jsonl
+    train_sha256: 4edbed2071e4010c83c45ce8d33d341e0813fba2276150c82c990f1c7e9822f6
+    internal_validation_split: splits/production_train90_validation10_seed42/validation10_of_train80_seed42.jsonl
+    internal_validation_sha256: f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838
+  training:
+    max_optimizer_steps: 100
+    learning_rate: 2.0e-5
+    # Retained for config compatibility only. With mlp1 frozen, build_optimizer
+    # creates no projector parameter group and this LR is never applied.
+    projector_learning_rate: 1.0e-5
+    max_grad_norm: 1.0
+    checkpoint_interval: 25
+
+locked_contract:
+  model_revision: c32291ca5e996f5a7a485845b4f57a233936bba0
+  parser: native_locateanything
+  reward_weights: {format: 1.0, spatial: 1.0, semantic: 1.0}
+  spatial: {type: binary_iou, comparison: greater_than, iou_threshold: 0.5}
+  semantic: {type: medclip_roi_text_cosine, frozen: true, image_input: native_predicted_roi, text_input: original_query}
+  hybrid_logprob_objective: full_trajectory
+  score_rejected_pbd_proposals: true
+  runtime_contract:
+    carry_cache: true
+    replay_cache: true
+    live_cache_replay: true
+    full_trajectory: true
+    detach_kv: false
+    truncated_bptt: false
+    gradient_checkpointing: false
+    saved_tensor_offload: false
+  trainable_tensor_contract: {lora: 504, mlp1_projector: 0, total: 504}
+  projector_optimizer_group: absent
+  kl: {enabled: false, beta: 0.0}

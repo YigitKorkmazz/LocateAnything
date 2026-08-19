@@ -19,10 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(CHEST_DIR)); sys.path.insert(0, str(REPO_ROOT))
 INTERNAL_VALIDATION_SHA256 = "f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838"
 
-from rl.hybrid_rl import StochasticHybridRLDecoder  # noqa: E402
-from rl.pbd_rl import PBDSamplingConfig  # noqa: E402
 from rl.rewards import BOX_RE, COMPLETION_PARSERS, MedCLIPSemanticScorer, build_reward_pipeline_from_config, resolve_parser_name  # noqa: E402
-from rl.runtime import DEFAULT_HYBRID_NATIVE_CONFIG, build_policy_two_gpu_live_cache, load_verified_pairs, sampling_from_config, sha256_file, tokenize_rl_pair, write_json  # noqa: E402
+from rl.runtime import DEFAULT_HYBRID_NATIVE_CONFIG, build_policy_two_gpu_live_cache, build_rollout_decoder, load_verified_pairs, sha256_file, tokenize_rl_pair, write_json  # noqa: E402
 from two_gpu_g8_caseb_production import resolve_experiment_config  # noqa: E402
 
 
@@ -67,11 +65,12 @@ def _aggregate(rows: List[Dict[str, Any]], replicates: int, seed: int) -> Dict[s
         "iou_at_025": vals("iou_at_025"), "iou_gt_0_5": vals("iou_gt_0_5"), "mean_medclip_semantic_reward": vals("semantic_reward"),
         "near_full_image_box_rate": vals("near_full_image"), "near_full_image_box_rate_among_valid": valid_vals("near_full_image"),
         "mean_box_area_norm01_among_valid": valid_vals("box_area_norm01"),
+        "median_box_area_norm01_among_valid": valid_vals("box_area_norm01"),
         "total_reward_mean": vals("total_reward"), "total_reward_median": vals("total_reward"), "malformed_output_rate": vals("malformed_output"),
         "average_generated_token_count": vals("generated_token_count"), "truncation_rate": vals("truncated")}
     result = {name: _bootstrap(value, name, replicates, seed + index) for index, (name, value) in enumerate(metrics.items())}
     token_counts = vals("generated_token_count")
-    branches = {name: sum(row["committed_branch"] == name for row in rows) for name in ("pbd", "ntp_fallback", "none")}
+    branches = {name: sum(row["committed_branch"] == name for row in rows) for name in ("pbd", "ntp_fallback", "ntp_only", "none")}
     return {"n_samples": len(rows), "metrics": result, "branch_distribution": branches,
             "truncation_count": sum(int(row["truncated"]) for row in rows),
             "generated_token_count_summary": {"mean": float(statistics.fmean(token_counts)) if token_counts else 0.,
@@ -84,8 +83,8 @@ def _evaluate_condition(label: str, checkpoint: Path | None, *, config, pairs, d
     torch.manual_seed(int(config["evaluation"]["seed"]))
     model, tokenizer, processor, revision, shard = build_policy_two_gpu_live_cache(config, first_device=devices[0], second_device=devices[1])
     if checkpoint is not None: _load_trainable_checkpoint(model, checkpoint)
-    model.requires_grad_(False); model.eval(); sampling: PBDSamplingConfig = sampling_from_config(config)
-    decoder = StochasticHybridRLDecoder(model, tokenizer, sampling=sampling, logprob_objective="full_trajectory")
+    model.requires_grad_(False); model.eval()
+    decoder = build_rollout_decoder(model, tokenizer, config)
     scorer = MedCLIPSemanticScorer(device=devices[0]); rewards = build_reward_pipeline_from_config(config, scorer)
     parser = COMPLETION_PARSERS[resolve_parser_name(config)]; rows = []
     for sample_index, pair in enumerate(pairs):
@@ -113,7 +112,7 @@ def _evaluate_condition(label: str, checkpoint: Path | None, *, config, pairs, d
             "format_valid": float(component.format_valid), "geometry_valid": float(component.geometry_valid), "exactly_one_box": float(box_count == 1),
             "valid_native_box": float(valid_native), "box_area_norm01": float(box_area), "near_full_image": float(near_full),
             "malformed_or_no_box": float(not valid_native), "truncated": float(bool(getattr(trace, "truncated", False))),
-            "pbd_branch": float(branch == "pbd"), "ntp_branch": float(branch == "ntp_fallback"), "none_branch": float(branch == "none"),
+            "pbd_branch": float(branch == "pbd"), "ntp_branch": float(branch in {"ntp_fallback", "ntp_only"}), "none_branch": float(branch == "none"),
             "iou": float(component.final_iou), "iou_at_025": float(component.final_iou >= .25), "iou_gt_0_5": float(component.final_iou > .50),
             "semantic_reward": float(component.semantic_reward), "total_reward": float(component.total_reward),
             "malformed_output": float(parsed.error is not None), "parse_error": parsed.error, "reward": component.to_dict()})

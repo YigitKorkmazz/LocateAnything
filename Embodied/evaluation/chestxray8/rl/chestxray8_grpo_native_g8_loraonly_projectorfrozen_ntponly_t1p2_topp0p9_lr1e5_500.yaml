@@ -1,0 +1,90 @@
+# Controlled continuation of the selected LR=1e-5 diagnostic configuration.
+# Scientific fields are unchanged. Duration and checkpoint cadence are the
+# only procedural changes; validation gates each 100-update segment.
+base_config: chestxray8_grpo_hybrid_native.yaml
+
+experiment_contract:
+  status: prepared_do_not_run_automatically
+  run_name: G8_KL0_LORAONLY_PROJECTORFROZEN_NTPONLY_T1P2_TOPP0P9_LR1E5_500_CONTROLLED
+  scientific_reference: G8_KL0_LORAONLY_PROJECTORFROZEN_NTPONLY_T1P2_TOPP0P9_LR1E5_50
+  optimizer_update_limit: 500
+  checkpoint_steps: [100, 200, 300, 400, 500]
+  internal_validation_steps: [0, 100, 200, 300, 400, 500]
+  heldout_test_role: forbidden_during_training_and_selection
+
+overrides:
+  experiment: G8_KL0_LORAONLY_PROJECTORFROZEN_NTPONLY_T1P2_TOPP0P9_LR1E5_500_CONTROLLED
+  hardware:
+    required_gpu_name_substring: RTX 3090
+    visible_gpu_count: 2
+    decoder_layer_split: [18, 18]
+  model:
+    projector_trainable: false
+  objective:
+    loss_total: L_GRPO
+    group_size: 8
+    reference_kl:
+      enabled: false
+  policy_state:
+    synchronized_parameters: [lora]
+    reference_projector: frozen_pretrained_state
+  rollout:
+    path: stochastic_native_ntp_rl
+    temperature: 1.2
+    top_p: 0.9
+    top_k: 0
+    reconstruct_actions_from_text: false
+    hybrid:
+      enabled: false
+      logprob_objective: full_trajectory
+      score_rejected_pbd_proposals: false
+      prefer_committed_action_logprobs: true
+      fallback_enabled: false
+    ntp_only:
+      enabled: true
+      generation_mode: slow
+      pbd_enabled: false
+      mtp_enabled: false
+      hybrid_fallback_enabled: false
+      rejected_proposal_trajectory_enabled: false
+  data:
+    train_split: splits/production_train90_validation10_seed42/optimization90_of_train80_seed42.jsonl
+    train_sha256: 4edbed2071e4010c83c45ce8d33d341e0813fba2276150c82c990f1c7e9822f6
+    internal_validation_split: splits/production_train90_validation10_seed42/validation10_of_train80_seed42.jsonl
+    internal_validation_sha256: f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838
+  training:
+    seed: 42
+    max_optimizer_steps: 500
+    learning_rate: 1.0e-5
+    projector_learning_rate: 1.0e-5
+    max_grad_norm: 1.0
+    checkpoint_interval: 100
+  diagnostics:
+    spatial_density:
+      enabled: true
+      aggregate_every_optimizer_updates: 25
+      log_every_attempted_group: true
+      expected_group_size: 8
+
+locked_contract:
+  scientific_changes_from_lr1e5_50: none
+  procedural_changes:
+    training.max_optimizer_steps: {from: 50, to: 500}
+    training.checkpoint_interval: {from: 25, to: 100}
+  unchanged_sampling: {temperature: 1.2, top_p: 0.9, top_k: 0, repetition_penalty: 1.0}
+  learning_rate: 1.0e-5
+  model_revision: c32291ca5e996f5a7a485845b4f57a233936bba0
+  parser: native_locateanything
+  native_output: "<ref>...</ref><box>...</box>"
+  reward_weights: {format: 1.0, spatial: 1.0, semantic: 1.0}
+  spatial: {type: binary_iou, comparison: greater_than, iou_threshold: 0.5}
+  semantic: {type: medclip_roi_text_cosine, frozen: true, image_input: native_predicted_roi, text_input: original_query}
+  trainable_tensor_contract: {lora: 504, mlp1_projector: 0, total: 504}
+  runtime: {detach_kv: false, functional_kv_checkpoint_backend: true}
+  split: {optimization_examples: 710, internal_validation_examples: 80, seed: 42}
+  checkpoint_steps: [100, 200, 300, 400, 500]
+  internal_validation_steps: [0, 100, 200, 300, 400, 500]
+  early_stop:
+    near_full_and_nonimproving: {near_full_strictly_greater_than: 0.60, compare_mean_iou_to_previous_checkpoint: true}
+    two_consecutive_mean_iou_below_frozen_base: true
+

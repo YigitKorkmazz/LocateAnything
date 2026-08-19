@@ -181,6 +181,23 @@ class ZeroAdvantageFastPathTest(unittest.TestCase):
             )["matches"]
         )
 
+    def test_fresh_start_guard_pure_ntp_reaches_exactly_512(self):
+        trace = SimpleNamespace(
+            generated_token_ids=[1] * 512,
+            truncated=True,
+            stop_reason="max_token_budget",
+            reward_branch="none",
+            decoder_path=training.NTP_ONLY_DECODER_PATH,
+            max_reachable_generated_length=512,
+        )
+        component = SimpleNamespace(parse_error="no native box", total_reward=0.0)
+        result = training._fresh_start_trajectory_guard_predicates(
+            trace, component, max_new_tokens=512, block_size=6
+        )
+        self.assertEqual(result["maximum_reachable_generated_length"], 512)
+        self.assertEqual(result["reachability_mode"], "pure_ntp")
+        self.assertTrue(result["matches"])
+
 
 if __name__ == "__main__":
     unittest.main()

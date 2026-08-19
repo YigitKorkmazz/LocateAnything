@@ -1,0 +1,78 @@
+# Matched bbox-size-collapse ablation, condition C: LR=1e-6, KL off.
+base_config: chestxray8_grpo_hybrid_native.yaml
+
+experiment_contract:
+  status: prepared_for_manual_launch_only
+  condition: C
+  initialization: fresh_original_frozen_base
+  optimizer_update_limit: 500
+  checkpoint_steps: [100, 200, 300, 400, 500]
+  intermediate_validation: disabled
+  heldout_test_role: forbidden
+
+overrides:
+  experiment: G8_BBOX_SIZE_2X2_C_LR1E6_KL0_500
+  hardware:
+    required_gpu_name_substring: RTX 3090
+    visible_gpu_count: 2
+    decoder_layer_split: [18, 18]
+  model:
+    projector_trainable: false
+  objective:
+    loss_total: L_GRPO
+    group_size: 8
+    reference_kl:
+      enabled: false
+  policy_state:
+    synchronized_parameters: [lora]
+    reference_projector: frozen_pretrained_state
+  rollout:
+    path: stochastic_native_ntp_rl
+    temperature: 1.2
+    top_p: 0.9
+    top_k: 0
+    repetition_penalty: 1.0
+    max_new_tokens: 512
+    reconstruct_actions_from_text: false
+    hybrid:
+      enabled: false
+      logprob_objective: full_trajectory
+      score_rejected_pbd_proposals: false
+      prefer_committed_action_logprobs: true
+      fallback_enabled: false
+    ntp_only:
+      enabled: true
+      generation_mode: slow
+      pbd_enabled: false
+      mtp_enabled: false
+      hybrid_fallback_enabled: false
+      rejected_proposal_trajectory_enabled: false
+  data:
+    train_split: splits/production_train90_validation10_seed42/optimization90_of_train80_seed42.jsonl
+    train_sha256: 4edbed2071e4010c83c45ce8d33d341e0813fba2276150c82c990f1c7e9822f6
+    internal_validation_split: splits/production_train90_validation10_seed42/validation10_of_train80_seed42.jsonl
+    internal_validation_sha256: f22343be5c53aa61ef31dbd018070148f7c2d53580af0d176025f57a4d407838
+  training:
+    seed: 42
+    max_optimizer_steps: 500
+    learning_rate: 1.0e-6
+    projector_learning_rate: 1.0e-5
+    max_grad_norm: 1.0
+    checkpoint_interval: 100
+    resume_from_checkpoint: null
+  diagnostics:
+    spatial_density:
+      enabled: true
+      aggregate_every_optimizer_updates: 25
+      log_every_attempted_group: true
+      expected_group_size: 8
+
+locked_contract:
+  condition: {learning_rate: 1.0e-6, kl_beta: 0.0}
+  model_revision: c32291ca5e996f5a7a485845b4f57a233936bba0
+  reward_weights: {format: 1.0, spatial: 1.0, semantic: 1.0}
+  spatial: {type: binary_iou, comparison: greater_than, iou_threshold: 0.5}
+  trainable_tensor_contract: {lora: 504, mlp1_projector: 0, total: 504}
+  runtime: {detach_kv: false, functional_kv_checkpoint_backend: true}
+  fresh_start: {required: true, resume_forbidden: true, initial_optimizer_step: 0}
+  checkpoint_steps: [100, 200, 300, 400, 500]

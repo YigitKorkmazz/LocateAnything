@@ -17,6 +17,7 @@ import json
 import math
 import os
 import random
+import statistics
 import sys
 import tempfile
 import traceback
@@ -36,10 +37,17 @@ sys.path.insert(0, str(CHEST_DIR))
 sys.path.insert(0, str(REPO_ROOT))
 
 from rl.grpo import grpo_clipped_loss, group_relative_advantages  # noqa: E402
+from rl.exact_kv_checkpoint import functional_kv_layer_checkpointing  # noqa: E402
 from rl.medground_kl import clipped_grpo_with_medground_kl  # noqa: E402
 from rl.nan_grad_diagnostics import compare_grad_dicts  # noqa: E402
+from rl.ntp_rl import NTP_ONLY_DECODER_PATH, ntp_only_trajectory_diagnostic  # noqa: E402
 from rl.policy_state import PolicySnapshot, use_policy_snapshot  # noqa: E402
 from rl.rewards import MedCLIPSemanticScorer, build_reward_pipeline_from_config  # noqa: E402
+from rl.spatial_density_diagnostics import (  # noqa: E402
+    aggregate_spatial_density_window,
+    build_group_spatial_diagnostic,
+    validate_spatial_density_config,
+)
 from rl.runtime import (  # noqa: E402
     DEFAULT_HYBRID_NATIVE_CONFIG,
     build_policy_two_gpu_live_cache,
@@ -48,6 +56,7 @@ from rl.runtime import (  # noqa: E402
     generate_rollout_group,
     hybrid_logprob_objective,
     is_hybrid_rollout,
+    is_ntp_only_rollout,
     load_resolved_config,
     load_verified_pairs,
     tokenize_rl_pair,
@@ -61,8 +70,13 @@ from two_gpu_live_cache_feasibility import _ReplayKVRecorder, _cross_device_boun
 METRICS_FILENAME = "two_gpu_g4_grpo_multistep_metrics.jsonl"
 SUMMARY_FILENAME = "two_gpu_g4_grpo_multistep_summary.json"
 CHECKPOINT_PREFIX = "two_gpu_g4_grpo_multistep_step_"
+PRE_REPLAY_TRACE_METADATA_FILENAME = "two_gpu_g4_pre_replay_trace_metadata.jsonl"
 FRESH_START_GUARD_FILENAME = "fresh_start_eight_group_degeneracy_diagnostic.json"
 FRESH_START_GUARD_GROUPS = 8
+PERSIST_PRE_REPLAY_TRACE_METADATA = False
+SEMANTICS_PRESERVING_REPLAY_CUDA_CLEANUP = False
+PER_REPLAY_PEAK_MEMORY_DIAGNOSTICS = False
+EXACT_FUNCTIONAL_KV_LAYER_CHECKPOINTING = False
 GROUP_SIZE = 4
 EXPECTED_LORA_TENSORS = 504
 EXPECTED_PROJECTOR_TENSORS = 6
@@ -239,7 +253,12 @@ def _fresh_start_trajectory_guard_predicates(
     block_size: int,
 ) -> Dict[str, Any]:
     """Evaluate the exact deterministic fresh-start failure signature."""
-    maximum_reachable = int(max_new_tokens) - (int(max_new_tokens) % int(block_size))
+    pure_ntp = getattr(trace, "decoder_path", None) == NTP_ONLY_DECODER_PATH
+    maximum_reachable = (
+        int(getattr(trace, "max_reachable_generated_length", max_new_tokens))
+        if pure_ntp
+        else int(max_new_tokens) - (int(max_new_tokens) % int(block_size))
+    )
     generated_length = len(trace.generated_token_ids)
     stop_reason = getattr(trace, "stop_reason", None)
     predicates = {
@@ -257,6 +276,7 @@ def _fresh_start_trajectory_guard_predicates(
     }
     return {
         "maximum_reachable_generated_length": maximum_reachable,
+        "reachability_mode": "pure_ntp" if pure_ntp else "hybrid_or_pbd_block",
         "actual_generated_length": generated_length,
         "stop_reason": stop_reason,
         "predicates": predicates,
@@ -318,6 +338,120 @@ def _diagnostic_tensor_metadata(value: Any, *, include_values: bool = False) -> 
     return result
 
 
+def _pre_replay_trace_metadata(traces, components) -> List[Dict[str, Any]]:
+    """Materialize CPU/JSON trace facts before any replay can OOM."""
+    if len(traces) != len(components):
+        raise RuntimeError("trace/component count mismatch before replay")
+    rows = []
+    for group_index, (trace, component) in enumerate(zip(traces, components)):
+        committed_box = getattr(trace, "committed_final_box_norm_1000", None)
+        valid_native = bool(
+            component.format_valid
+            and component.geometry_valid
+            and component.has_unambiguous_committed_box
+            and committed_box is not None
+        )
+        rows.append(
+            {
+                "group_index": group_index,
+                "generated_token_count": len(trace.generated_token_ids),
+                "block_count": len(trace.blocks),
+                "truncated": bool(getattr(trace, "truncated", False)),
+                "stop_reason": getattr(trace, "stop_reason", None),
+                "max_new_tokens": int(getattr(trace, "max_new_tokens", 0)),
+                "format_valid": bool(component.format_valid),
+                "geometry_valid": bool(component.geometry_valid),
+                "has_unambiguous_committed_box": bool(
+                    component.has_unambiguous_committed_box
+                ),
+                "valid_native_box": valid_native,
+                "parse_error": component.parse_error,
+                "reward_branch": component.reward_branch,
+            }
+        )
+    return rows
+
+
+def _graph_free_cuda_cleanup() -> None:
+    """Release unreachable cached CUDA blocks only after autograd is finished."""
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+def _checkpoint_backend_contract(
+    config: Mapping[str, Any], runtime_contract: Mapping[str, Any]
+) -> Dict[str, Any]:
+    enabled = bool(EXACT_FUNCTIONAL_KV_LAYER_CHECKPOINTING)
+    if enabled:
+        if not is_ntp_only_rollout(config):
+            raise RuntimeError(
+                "functional-KV checkpointing is approved only for pure-NTP replay"
+            )
+        if bool(runtime_contract["detach_kv"]):
+            raise RuntimeError("functional-KV checkpointing requires detach_kv=false")
+        if not bool(runtime_contract["full_trajectory"]):
+            raise RuntimeError(
+                "functional-KV checkpointing requires full-trajectory gradients"
+            )
+    return {
+        "enabled": enabled,
+        "mode": "functional_kv_decoder_layer" if enabled else "disabled",
+        "use_reentrant": False,
+        "detach_kv": bool(runtime_contract["detach_kv"]),
+        "scope": "current_policy_differentiable_replay_only" if enabled else None,
+    }
+
+
+def _assert_first_checkpointed_replay(
+    checkpoint_report: Mapping[str, Any], live_kv: Mapping[str, Any]
+) -> Dict[str, Any]:
+    calls_by_layer = {
+        int(index): int(count)
+        for index, count in dict(
+            checkpoint_report.get("checkpoint_calls_by_layer") or {}
+        ).items()
+    }
+    expected_layers = set(range(36))
+    used_layers = {index for index, count in calls_by_layer.items() if count > 0}
+    replay_blocks = list(live_kv.get("replay_blocks") or [])
+    cache_layers = [
+        layer
+        for block in replay_blocks
+        for layer in (block.get("returned_cache") or {}).get("layers", [])
+    ]
+    all_kv_differentiable = bool(cache_layers) and all(
+        bool(layer.get("key_requires_grad"))
+        and bool(layer.get("value_requires_grad"))
+        and layer.get("key_grad_fn") is not None
+        and layer.get("value_grad_fn") is not None
+        for layer in cache_layers
+    )
+    result = {
+        "backend_entered": bool(checkpoint_report.get("enabled")),
+        "wrapped_layer_count": int(checkpoint_report.get("wrapped_layer_count", 0)),
+        "all_36_layers_checkpointed": used_layers == expected_layers,
+        "checkpoint_calls": int(checkpoint_report.get("checkpoint_calls", 0)),
+        "checkpoint_calls_by_layer": calls_by_layer,
+        "live_kv_differentiable": all_kv_differentiable,
+        "no_kv_tensor_detached": all_kv_differentiable,
+        "detach_kv": False,
+    }
+    if not all(
+        (
+            result["backend_entered"],
+            result["wrapped_layer_count"] == 36,
+            result["all_36_layers_checkpointed"],
+            result["live_kv_differentiable"],
+            result["no_kv_tensor_detached"],
+        )
+    ):
+        raise RuntimeError(
+            "functional-KV first-replay runtime contract failed: "
+            + json.dumps(result, sort_keys=True)
+        )
+    return result
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(DEFAULT_HYBRID_NATIVE_CONFIG))
@@ -368,8 +502,96 @@ def _projector_params(model):
     return [(n, p) for n, p in model.named_parameters() if "mlp1." in n and p.requires_grad]
 
 
+def _all_projector_params(model):
+    return [
+        (n, p)
+        for n, p in model.named_parameters()
+        if n == "mlp1" or n.startswith("mlp1.")
+    ]
+
+
 def _trainable_params(model):
     return [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+
+
+def _startup_trainable_contract_report(model) -> Dict[str, Any]:
+    trainable = _trainable_params(model)
+    lora = [(n, p) for n, p in trainable if "lora_" in n.lower()]
+    projector = [
+        (n, p)
+        for n, p in trainable
+        if n == "mlp1" or n.startswith("mlp1.")
+    ]
+    expected_names = {n for n, _ in lora}
+    if EXPECTED_PROJECTOR_TENSORS:
+        expected_names.update(n for n, _ in projector)
+    unexpected = [n for n, _ in trainable if n not in expected_names]
+    report = {
+        "total_trainable_parameter_tensors": len(trainable),
+        "total_trainable_parameter_count": int(sum(p.numel() for _, p in trainable)),
+        "lora_trainable_tensor_count": len(lora),
+        "projector_trainable_tensor_count": len(projector),
+        "unexpected_trainable_parameter_names": unexpected,
+        "expected_lora_trainable_tensor_count": EXPECTED_LORA_TENSORS,
+        "expected_projector_trainable_tensor_count": EXPECTED_PROJECTOR_TENSORS,
+        "expected_total_trainable_tensor_count": EXPECTED_TRAINABLE_TENSORS,
+    }
+    if (
+        len(lora) != EXPECTED_LORA_TENSORS
+        or len(projector) != EXPECTED_PROJECTOR_TENSORS
+        or len(trainable) != EXPECTED_TRAINABLE_TENSORS
+        or unexpected
+    ):
+        raise RuntimeError(
+            "trainable tensor contract mismatch: " + json.dumps(report, sort_keys=True)
+        )
+    return report
+
+
+def _optimizer_contract_report(model, optimizer) -> Dict[str, Any]:
+    named = list(model.named_parameters())
+    name_by_id = {id(parameter): name for name, parameter in named}
+    trainable_ids = {id(parameter) for _, parameter in named if parameter.requires_grad}
+    optimizer_parameters = [
+        parameter
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    ]
+    optimizer_ids = [id(parameter) for parameter in optimizer_parameters]
+    optimizer_names = [name_by_id.get(parameter_id, "<unknown>") for parameter_id in optimizer_ids]
+    projector_names = [
+        name
+        for name in optimizer_names
+        if name == "mlp1" or name.startswith("mlp1.")
+    ]
+    report = {
+        "optimizer_group_count": len(optimizer.param_groups),
+        "optimizer_parameter_tensor_count": len(optimizer_parameters),
+        "optimizer_projector_tensor_count": len(projector_names),
+        "optimizer_projector_parameter_names": projector_names,
+        "optimizer_unknown_parameter_names": [name for name in optimizer_names if name == "<unknown>"],
+        "optimizer_duplicate_parameter_tensor_count": len(optimizer_ids) - len(set(optimizer_ids)),
+        "optimizer_missing_trainable_parameter_names": [
+            name for name, parameter in named if parameter.requires_grad and id(parameter) not in set(optimizer_ids)
+        ],
+        "optimizer_frozen_parameter_names": [
+            name for name, parameter in named if not parameter.requires_grad and id(parameter) in set(optimizer_ids)
+        ],
+        "optimizer_covers_exactly_trainable_parameters": set(optimizer_ids) == trainable_ids,
+        "optimizer_group_learning_rates": [float(group["lr"]) for group in optimizer.param_groups],
+    }
+    if (
+        not report["optimizer_covers_exactly_trainable_parameters"]
+        or report["optimizer_unknown_parameter_names"]
+        or report["optimizer_duplicate_parameter_tensor_count"]
+        or report["optimizer_missing_trainable_parameter_names"]
+        or report["optimizer_frozen_parameter_names"]
+        or len(projector_names) != EXPECTED_PROJECTOR_TENSORS
+    ):
+        raise RuntimeError(
+            "optimizer parameter contract mismatch: " + json.dumps(report, sort_keys=True)
+        )
+    return report
 
 
 def _trainable_state(model) -> Dict[str, torch.Tensor]:
@@ -407,15 +629,64 @@ def _grad_report(model) -> Dict[str, Any]:
                 f"{prefix}_gradient_norm": math.sqrt(norm_sq), f"all_{prefix}_present": not missing,
                 f"{prefix}_all_finite": not nonfinite, f"{prefix}_nontrivial": bool(nonzero)}
     lora, projector, trainable = _lora_params(model), _projector_params(model), _trainable_params(model)
+    all_projector = _all_projector_params(model)
     result = {**one("lora", lora), **one("projector", projector), **one("trainable", trainable)}
     total_norm_sq = sum(float(p.grad.detach().float().square().sum().item()) for _, p in trainable if p.grad is not None)
+    lora_with_grad = [(n, p) for n, p in lora if p.grad is not None]
+    lora_finite = [
+        (n, p)
+        for n, p in lora_with_grad
+        if bool(torch.isfinite(p.grad).all().item())
+    ]
+    lora_grad_norms = [
+        float(p.grad.detach().float().norm().item()) for _, p in lora_with_grad
+    ]
+    projector_with_grad = [n for n, p in all_projector if p.grad is not None]
+    frozen_non_lora_with_grad = [
+        n
+        for n, p in model.named_parameters()
+        if not p.requires_grad and "lora_" not in n.lower() and p.grad is not None
+    ]
     result.update({"expected_lora_tensors": len(lora), "expected_projector_tensors": len(projector),
                    "expected_trainable_tensors": len(trainable), "all_504_present": len(lora) == EXPECTED_LORA_TENSORS and not result["missing_lora_gradients"],
                    "all_6_projector_present": len(projector) == EXPECTED_PROJECTOR_TENSORS and not result["missing_projector_gradients"],
                    "all_510_trainable_present": len(trainable) == EXPECTED_TRAINABLE_TENSORS and not result["missing_trainable_gradients"],
+                   "all_expected_lora_gradients_present": len(lora) == EXPECTED_LORA_TENSORS and not result["missing_lora_gradients"],
+                   "all_expected_projector_gradients_present": len(projector) == EXPECTED_PROJECTOR_TENSORS and not result["missing_projector_gradients"],
+                   "all_expected_trainable_gradients_present": len(trainable) == EXPECTED_TRAINABLE_TENSORS and not result["missing_trainable_gradients"],
                    "all_finite": not result["nonfinite_trainable_gradients"], "nontrivial": bool(result["nonzero_trainable_gradient_tensors"]),
-                   "cumulative_gradient_norm": math.sqrt(total_norm_sq)})
+                   "cumulative_gradient_norm": math.sqrt(total_norm_sq),
+                   "lora_tensors_with_grad": len(lora_with_grad),
+                   "lora_tensors_with_finite_grad": len(lora_finite),
+                   "projector_tensors_with_grad": len(projector_with_grad),
+                   "projector_gradient_parameter_names": projector_with_grad,
+                   "frozen_non_lora_tensors_with_grad": len(frozen_non_lora_with_grad),
+                   "frozen_non_lora_gradient_parameter_names": frozen_non_lora_with_grad,
+                   "lora_grad_norm_summary": {
+                       "min": min(lora_grad_norms) if lora_grad_norms else None,
+                       "median": statistics.median(lora_grad_norms) if lora_grad_norms else None,
+                       "max": max(lora_grad_norms) if lora_grad_norms else None,
+                   }})
     return result
+
+
+def _assert_lora_only_gradient_sanity(gradients: Mapping[str, Any]) -> None:
+    if EXPECTED_PROJECTOR_TENSORS != 0:
+        raise RuntimeError("LoRA-only gradient sanity check requires zero expected projector tensors")
+    failures = []
+    if gradients["projector_tensors_with_grad"]:
+        failures.append("projector parameter received a gradient")
+    if gradients["frozen_non_lora_tensors_with_grad"]:
+        failures.append("frozen non-LoRA parameter received a gradient")
+    if gradients["nonfinite_lora_gradients"]:
+        failures.append("LoRA gradient contains NaN/Inf")
+    if failures:
+        raise RuntimeError(
+            "LoRA-only gradient sanity check failed: "
+            + "; ".join(failures)
+            + "; report="
+            + json.dumps(dict(gradients), sort_keys=True)
+        )
 
 
 def _global_clip_gradients(
@@ -518,6 +789,21 @@ def _reset_peaks(devices: List[torch.device]) -> None:
         torch.cuda.reset_peak_memory_stats(int(d.index or 0))
 
 
+def _replay_peak_memory_diagnostics(devices: List[torch.device]) -> Dict[str, Any]:
+    """Return scalar allocator counters; never retain CUDA tensors or graphs."""
+    result = {}
+    for device in devices:
+        index = int(device.index or 0)
+        torch.cuda.synchronize(index)
+        result[str(device)] = {
+            "allocated": int(torch.cuda.memory_allocated(index)),
+            "reserved": int(torch.cuda.memory_reserved(index)),
+            "max_memory_allocated": int(torch.cuda.max_memory_allocated(index)),
+            "max_memory_reserved": int(torch.cuda.max_memory_reserved(index)),
+        }
+    return result
+
+
 def _optimizer_devices(optimizer) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for state in optimizer.state.values():
@@ -534,7 +820,7 @@ def _optimizer_state_finite(optimizer) -> bool:
 
 def _trace_summary(trace, component) -> Dict[str, Any]:
     token_ids = [int(token) for token in trace.generated_token_ids]
-    return {
+    summary = {
         "reward": component.to_dict(), "committed_branch": getattr(trace, "reward_branch", None),
         "committed_final_bbox_norm_1000": getattr(trace, "committed_final_box_norm_1000", None),
         "has_unambiguous_committed_box": bool(getattr(trace, "has_unambiguous_committed_box", False)),
@@ -545,6 +831,11 @@ def _trace_summary(trace, component) -> Dict[str, Any]:
         "scored_block_count": sum(bool(getattr(b, "scored_for_grpo", True)) for b in trace.blocks),
         "block_count": len(trace.blocks),
     }
+    if getattr(trace, "decoder_path", None) == NTP_ONLY_DECODER_PATH:
+        summary["ntp_only_trajectory"] = ntp_only_trajectory_diagnostic(
+            trace, component
+        )
+    return summary
 
 
 def _rng_state() -> Dict[str, Any]:
@@ -874,13 +1165,25 @@ def main() -> None:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path, summary_path = output_dir / METRICS_FILENAME, output_dir / SUMMARY_FILENAME
-    if metrics_path.exists() or summary_path.exists():
+    pre_replay_metadata_path = output_dir / PRE_REPLAY_TRACE_METADATA_FILENAME
+    if (
+        metrics_path.exists()
+        or summary_path.exists()
+        or (
+            PERSIST_PRE_REPLAY_TRACE_METADATA
+            and pre_replay_metadata_path.exists()
+        )
+    ):
         raise FileExistsError("refusing to append to an existing smoke-run output directory")
     if args.dry_run_config:
         config = load_resolved_config(args.config)
         _validate_config(config)
         runtime_contract = _effective_runtime_contract(config)
         kl_config = _effective_kl_config(config)
+        checkpoint_backend = _checkpoint_backend_contract(config, runtime_contract)
+        spatial_density_interval = validate_spatial_density_config(
+            config, group_size=GROUP_SIZE
+        )
         print(
             json.dumps(
                 {"event": "effective_runtime_contract", **runtime_contract},
@@ -904,6 +1207,8 @@ def main() -> None:
             "objective": config["objective"]["loss_total"],
             "effective_kl_config": kl_config,
             "effective_runtime_contract": runtime_contract,
+            "checkpoint_backend": checkpoint_backend,
+            "spatial_density_diagnostic_interval": spatial_density_interval,
             "max_grad_norm": float(config["training"]["max_grad_norm"]),
             "bfix": False,
             "split_metadata": split_metadata,
@@ -919,6 +1224,16 @@ def main() -> None:
         "truncated_bptt": False, "gradient_checkpointing": False, "selective_saved_tensor_cpu_offload": False,
         "scheduler_steps": 0,
         "metrics_jsonl": str(metrics_path), "optimizer_steps": 0, "attempted_group_count": 0,
+        "pre_replay_trace_metadata_jsonl": (
+            str(pre_replay_metadata_path)
+            if PERSIST_PRE_REPLAY_TRACE_METADATA
+            else None
+        ),
+        "semantics_preserving_replay_cuda_cleanup": bool(
+            SEMANTICS_PRESERVING_REPLAY_CUDA_CLEANUP
+        ),
+        "per_replay_peak_memory_diagnostics": bool(PER_REPLAY_PEAK_MEMORY_DIAGNOSTICS),
+        "checkpoint_backend": None,
         "skipped_zero_advantage_group_count": 0, "trajectories": 0, "checkpoints": [],
         "diagnostic_checkpoint_steps": sorted(checkpoint_steps)}
     summary["all_step_checks"] = {
@@ -935,6 +1250,9 @@ def main() -> None:
             raise RuntimeError("requires exactly two visible CUDA devices")
         config = load_resolved_config(args.config)
         _validate_config(config)
+        spatial_density_interval = validate_spatial_density_config(
+            config, group_size=GROUP_SIZE
+        )
         hardware = config.get("hardware") or {}
         required_gpu_name = hardware.get("required_gpu_name_substring")
         gpu_names = [torch.cuda.get_device_name(index) for index in range(2)]
@@ -944,9 +1262,17 @@ def main() -> None:
             )
         runtime_contract = _effective_runtime_contract(config)
         kl_config = _effective_kl_config(config)
+        checkpoint_backend = _checkpoint_backend_contract(config, runtime_contract)
         print(
             json.dumps(
                 {"event": "effective_runtime_contract", **runtime_contract},
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        print(
+            json.dumps(
+                {"event": "checkpoint_backend_contract", **checkpoint_backend},
                 sort_keys=True,
             ),
             flush=True,
@@ -967,7 +1293,9 @@ def main() -> None:
                 "max_grad_norm": float(config["training"]["max_grad_norm"]),
                 "objective": config["objective"]["loss_total"],
                 "effective_kl_config": kl_config,
+                "checkpoint_backend": checkpoint_backend,
                 "visible_gpu_names": gpu_names,
+                "spatial_density_diagnostic_interval": spatial_density_interval,
             }
         )
         split_metadata = _manifest_metadata(args, config)
@@ -977,8 +1305,7 @@ def main() -> None:
         model, tokenizer, processor, revision, shard = build_policy_two_gpu_live_cache(config, first_device=devices[0], second_device=devices[1])
         resolve_locateanything_qwen_decoder(model).decoder._chestxray8_debug_position_ids = bool(args.debug_position_ids)
         model.eval()
-        if len(_lora_params(model)) != EXPECTED_LORA_TENSORS or len(_projector_params(model)) != EXPECTED_PROJECTOR_TENSORS or len(_trainable_params(model)) != EXPECTED_TRAINABLE_TENSORS:
-            raise RuntimeError("expected exactly 504 LoRA + 6 mlp1 projector Case-B trainable tensors")
+        startup_trainable_contract = _startup_trainable_contract_report(model)
         reference_snapshot = (
             PolicySnapshot.capture(model, optimizer_step=0)
             if kl_config["enabled"] else None
@@ -986,6 +1313,15 @@ def main() -> None:
         optimizer = build_optimizer(model, lr=float(config["training"]["learning_rate"]),
             projector_lr=float(config["training"]["projector_learning_rate"]), weight_decay=float(config["training"]["weight_decay"]),
             use_8bit_adam=bool(config["training"]["use_8bit_adam"]))
+        startup_trainable_contract["optimizer"] = _optimizer_contract_report(model, optimizer)
+        summary["startup_trainable_contract"] = startup_trainable_contract
+        print(
+            json.dumps(
+                {"event": "startup_trainable_contract", **startup_trainable_contract},
+                sort_keys=True,
+            ),
+            flush=True,
+        )
         global_step, sample_cursor = 0, 0
         attempted_group_count, skipped_zero_advantage_group_count = 0, 0
         deferred_rng_state = None
@@ -1158,6 +1494,9 @@ def main() -> None:
             and sample_cursor == 0
         )
         guard_groups: List[Dict[str, Any]] = []
+        spatial_density_window: List[Dict[str, Any]] = []
+        checkpoint_first_replay_verified = False
+        summary["spatial_density_windows"] = []
         summary["fresh_start_eight_group_guard"] = {
             "armed": guard_armed,
             "group_limit": FRESH_START_GUARD_GROUPS,
@@ -1198,13 +1537,39 @@ def main() -> None:
             reward_values = [float(component.total_reward) for component in components]
             advantages = group_relative_advantages(reward_values).to(devices[1])
             all_advantages_zero = _all_advantages_exactly_zero(advantages)
+            pre_replay_trace_metadata = (
+                _pre_replay_trace_metadata(traces, components)
+                if PERSIST_PRE_REPLAY_TRACE_METADATA
+                else None
+            )
+            group_spatial_diagnostic = None
+            if spatial_density_interval:
+                group_spatial_diagnostic = build_group_spatial_diagnostic(
+                    traces, components, expected_group_size=GROUP_SIZE
+                )
+                spatial_density_window.append(group_spatial_diagnostic)
             emergency_record = {"attempted_group_count": attempted_group_count, "optimizer_step_count_before_group": global_step,
                 "sample_index": sample_index, "sample_cursor_before_group": sample_cursor, "attempt_seed": attempt_seed,
                 "effective_runtime_contract": runtime_contract,
                 "effective_kl_config": kl_config,
                 "reward_group": {"rewards": reward_values, "mean": float(sum(reward_values) / GROUP_SIZE),
                 "std": float(torch.tensor(reward_values).std(unbiased=False)), "advantages": [float(x.cpu()) for x in advantages],
-                "all_advantages_zero": all_advantages_zero}, "trajectories": [], "step_status": "in_progress"}
+                "all_advantages_zero": all_advantages_zero},
+                "pre_replay_trace_metadata": pre_replay_trace_metadata,
+                "spatial_density_diagnostic": group_spatial_diagnostic,
+                "trajectories": [], "step_status": "in_progress"}
+            if PERSIST_PRE_REPLAY_TRACE_METADATA:
+                _append_jsonl(
+                    pre_replay_metadata_path,
+                    {
+                        "attempted_group_count": attempted_group_count,
+                        "optimizer_step_count_before_group": global_step,
+                        "sample_index": sample_index,
+                        "sample_cursor_before_group": sample_cursor,
+                        "attempt_seed": attempt_seed,
+                        "traces": pre_replay_trace_metadata,
+                    },
+                )
             if guard_armed and len(guard_groups) < FRESH_START_GUARD_GROUPS:
                 guard_groups.append(
                     {
@@ -1312,9 +1677,15 @@ def main() -> None:
                                 "max_token_budget",
                                 "proposal_exceeds_remaining_token_budget",
                             ],
-                            "generated_length": (
-                                "max_new_tokens - (max_new_tokens % block_size)"
-                            ),
+                            "generated_length": {
+                                "pure_ntp": (
+                                    "trace.max_reachable_generated_length "
+                                    "(exactly max_new_tokens)"
+                                ),
+                                "hybrid_or_pbd_block": (
+                                    "max_new_tokens - (max_new_tokens % block_size)"
+                                ),
+                            },
                             "reward_branch": "none",
                             "parse_error": "no native box",
                             "total_reward": 0.0,
@@ -1369,6 +1740,8 @@ def main() -> None:
                     )[0].detach()
                     for trace in traces
                 ]
+                if not all(bool(torch.isfinite(value).all().item()) for value in old_logps):
+                    raise RuntimeError("nonfinite old-policy replay logprob")
                 reference_scores = []
                 if kl_config["enabled"]:
                     if reference_snapshot is None:
@@ -1395,6 +1768,8 @@ def main() -> None:
                         raise RuntimeError("reference policy scoring unexpectedly enabled autograd")
                     if any(value.requires_grad for value in reference_snapshot.tensors.values()):
                         raise RuntimeError("frozen reference snapshot unexpectedly requires gradients")
+            if SEMANTICS_PRESERVING_REPLAY_CUDA_CLEANUP:
+                _graph_free_cuda_cleanup()
             optimizer.zero_grad(set_to_none=True)
             before_lora = _lora_state(model)
             before_trainable = _trainable_state(model)
@@ -1404,76 +1779,115 @@ def main() -> None:
             group_grpo_losses: List[float] = []
             group_total_losses: List[float] = []
             for group_index, trace in enumerate(traces):
+                if PER_REPLAY_PEAK_MEMORY_DIAGNOSTICS:
+                    _reset_peaks(devices)
                 resolved = resolve_locateanything_qwen_decoder(model).decoder
                 resolved._chestxray8_two_gpu_boundary_events = []
                 recorder = _ReplayKVRecorder(DecoderShardLayout(devices[0], devices[1], 18))
-                if kl_config["enabled"]:
-                    current, blocks, policy_token_logps, token_metadata = (
-                        replayer.score_with_token_logprobs(
+                with functional_kv_layer_checkpointing(
+                    model, enabled=EXACT_FUNCTIONAL_KV_LAYER_CHECKPOINTING
+                ) as checkpoint_report:
+                    if kl_config["enabled"]:
+                        current, blocks, policy_token_logps, token_metadata = (
+                            replayer.score_with_token_logprobs(
+                                trace,
+                                use_cache=runtime_contract["replay_cache"],
+                                legacy_nocache_masks=False,
+                                on_scored_block_cache=recorder.record,
+                                **decoder_kwargs,
+                            )
+                        )
+                        reference = reference_scores[group_index]
+                        reference_token_logps = reference["token_logps"].to(
+                            device=policy_token_logps.device,
+                            dtype=policy_token_logps.dtype,
+                        )
+                        if token_metadata != reference["token_metadata"]:
+                            raise RuntimeError("policy/reference Hybrid KL token masks differ")
+                        token_mask = torch.ones_like(policy_token_logps, dtype=torch.bool)
+                        composed = clipped_grpo_with_medground_kl(
+                            current,
+                            old_logps[group_index],
+                            advantages[group_index],
+                            policy_token_logps,
+                            reference_token_logps,
+                            beta=float(kl_config["beta"]),
+                            clip_epsilon=float(config["objective"]["ppo_clip_epsilon"]),
+                            token_mask=token_mask,
+                        )
+                        loss = composed.total_loss
+                        loss_grpo = composed.grpo_loss
+                        kl_value = composed.kl_value
+                        kl_contribution = composed.kl_loss_contribution
+                        reference_logp = composed.reference_logp
+                        rejected_count = sum(
+                            int(item["rejected_pbd_proposal_token"])
+                            for item in token_metadata
+                        )
+                    else:
+                        current, blocks = replayer.score(
                             trace,
                             use_cache=runtime_contract["replay_cache"],
                             legacy_nocache_masks=False,
                             on_scored_block_cache=recorder.record,
                             **decoder_kwargs,
                         )
-                    )
-                    reference = reference_scores[group_index]
-                    reference_token_logps = reference["token_logps"].to(
-                        device=policy_token_logps.device,
-                        dtype=policy_token_logps.dtype,
-                    )
-                    if token_metadata != reference["token_metadata"]:
-                        raise RuntimeError("policy/reference Hybrid KL token masks differ")
-                    token_mask = torch.ones_like(policy_token_logps, dtype=torch.bool)
-                    composed = clipped_grpo_with_medground_kl(
-                        current,
-                        old_logps[group_index],
-                        advantages[group_index],
-                        policy_token_logps,
-                        reference_token_logps,
-                        beta=float(kl_config["beta"]),
-                        clip_epsilon=float(config["objective"]["ppo_clip_epsilon"]),
-                        token_mask=token_mask,
-                    )
-                    loss = composed.total_loss
-                    loss_grpo = composed.grpo_loss
-                    kl_value = composed.kl_value
-                    kl_contribution = composed.kl_loss_contribution
-                    reference_logp = composed.reference_logp
-                    rejected_count = sum(
-                        int(item["rejected_pbd_proposal_token"])
-                        for item in token_metadata
-                    )
-                else:
-                    current, blocks = replayer.score(
-                        trace,
-                        use_cache=runtime_contract["replay_cache"],
-                        legacy_nocache_masks=False,
-                        on_scored_block_cache=recorder.record,
-                        **decoder_kwargs,
-                    )
-                    loss_grpo = grpo_clipped_loss(
-                        current.reshape(1),
-                        old_logps[group_index].detach().reshape(1).to(
-                            current.device, torch.float32
-                        ),
-                        advantages[group_index].detach().reshape(1),
-                        clip_epsilon=float(config["objective"]["ppo_clip_epsilon"]),
-                    )
-                    loss = loss_grpo
-                    kl_value = torch.zeros((), device=current.device)
-                    kl_contribution = torch.zeros((), device=current.device)
-                    reference_logp = torch.tensor(float("nan"), device=current.device)
-                    policy_token_logps = torch.empty(0, device=current.device)
-                    token_metadata = []
-                    token_mask = torch.empty(0, dtype=torch.bool, device=current.device)
-                    rejected_count = 0
-                scaled = loss / GROUP_SIZE
-                scaled.backward()
+                        if not bool(torch.isfinite(current).all().item()) or not all(
+                            bool(torch.isfinite(value).all().item()) for value in blocks
+                        ):
+                            raise RuntimeError("nonfinite current-policy replay logprob")
+                        loss_grpo = grpo_clipped_loss(
+                            current.reshape(1),
+                            old_logps[group_index].detach().reshape(1).to(
+                                current.device, torch.float32
+                            ),
+                            advantages[group_index].detach().reshape(1),
+                            clip_epsilon=float(config["objective"]["ppo_clip_epsilon"]),
+                        )
+                        loss = loss_grpo
+                        kl_value = torch.zeros((), device=current.device)
+                        kl_contribution = torch.zeros((), device=current.device)
+                        reference_logp = torch.tensor(float("nan"), device=current.device)
+                        policy_token_logps = torch.empty(0, device=current.device)
+                        token_metadata = []
+                        token_mask = torch.empty(0, dtype=torch.bool, device=current.device)
+                        rejected_count = 0
+                    scaled = loss / GROUP_SIZE
+                    scaled.backward()
+                checkpoint_report = dict(checkpoint_report)
                 group_kl_values.append(float(kl_value.detach().float().cpu()))
                 group_grpo_losses.append(float(loss_grpo.detach().float().cpu()))
                 group_total_losses.append(float(loss.detach().float().cpu()))
                 live_kv, boundary, grads = recorder.report(), _cross_device_boundary_report(model), _grad_report(model)
+                checkpoint_runtime_assertion = None
+                if (
+                    EXACT_FUNCTIONAL_KV_LAYER_CHECKPOINTING
+                    and not checkpoint_first_replay_verified
+                ):
+                    checkpoint_runtime_assertion = _assert_first_checkpointed_replay(
+                        checkpoint_report, live_kv
+                    )
+                    checkpoint_first_replay_verified = True
+                    summary["checkpoint_backend"]["first_replay_verified"] = True
+                    summary["checkpoint_backend"]["first_replay_runtime_assertion"] = (
+                        checkpoint_runtime_assertion
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "event": "checkpoint_backend_first_replay_verified",
+                                **checkpoint_runtime_assertion,
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+                replay_memory = _memory(devices)
+                replay_peak_memory = (
+                    _replay_peak_memory_diagnostics(devices)
+                    if PER_REPLAY_PEAK_MEMORY_DIAGNOSTICS
+                    else None
+                )
                 trajectory_records.append({**_trace_summary(trace, components[group_index]), "group_index": group_index,
                     "rollout_seed": attempt_seed * GROUP_SIZE + group_index, "advantage": float(advantages[group_index].cpu()),
                     "old_logp": float(old_logps[group_index].float().cpu()), "current_logp": float(current.detach().float().cpu()),
@@ -1497,7 +1911,11 @@ def main() -> None:
                     "reference_scored_under_no_grad": bool(kl_config["enabled"]),
                     "reference_gradients_present": False,
                     "block_logps": [float(x.detach().float().cpu()) for x in blocks], "cumulative_gradients": grads,
-                    "live_kv": live_kv, "cross_device_boundary": boundary, "per_gpu_memory_after_backward": _memory(devices),
+                    "live_kv": live_kv, "cross_device_boundary": boundary,
+                    "checkpoint_backend": checkpoint_report,
+                    "checkpoint_first_replay_assertion": checkpoint_runtime_assertion,
+                    "per_gpu_memory_after_backward": replay_memory,
+                    "per_replay_peak_memory": replay_peak_memory,
                     "pre_backward": {"loss_grpo_unscaled": float(loss_grpo.detach().float().cpu()),
                     "kl_value": float(kl_value.detach().float().cpu()),
                     "kl_loss_contribution": float(kl_contribution.detach().float().cpu()),
@@ -1511,9 +1929,57 @@ def main() -> None:
                 recorder._previous_next_cache = None
                 del current, blocks, loss, loss_grpo, kl_value, kl_contribution, scaled, recorder
                 del policy_token_logps, token_metadata, token_mask, reference_logp
-                gc.collect()
+                del live_kv, boundary, grads, replay_memory, replay_peak_memory
+                del checkpoint_report, checkpoint_runtime_assertion
+                if SEMANTICS_PRESERVING_REPLAY_CUDA_CLEANUP:
+                    _graph_free_cuda_cleanup()
+                else:
+                    gc.collect()
+            if global_step == 0 and is_ntp_only_rollout(config):
+                first_update_diagnostics = []
+                for index, (trace, component) in enumerate(zip(traces, components)):
+                    diagnostic = ntp_only_trajectory_diagnostic(trace, component)
+                    diagnostic.update(
+                        {
+                            "group_index": index,
+                            "old_replay_logp": trajectory_records[index]["old_logp"],
+                            "current_replay_logp": trajectory_records[index]["current_logp"],
+                            "replay_logprobs_finite": bool(
+                                math.isfinite(trajectory_records[index]["old_logp"])
+                                and math.isfinite(trajectory_records[index]["current_logp"])
+                                and all(
+                                    math.isfinite(value)
+                                    for value in trajectory_records[index]["block_logps"]
+                                )
+                            ),
+                        }
+                    )
+                    if not diagnostic["replay_logprobs_finite"]:
+                        raise RuntimeError("first-update NTP replay logprobs are nonfinite")
+                    first_update_diagnostics.append(diagnostic)
+                emergency_record["first_update_ntp_only_trajectory_diagnostics"] = (
+                    first_update_diagnostics
+                )
             gradients = _grad_report(model)
             emergency_record["pre_step_accumulated_gradients"] = gradients
+            if EXPECTED_PROJECTOR_TENSORS == 0:
+                _assert_lora_only_gradient_sanity(gradients)
+                if global_step == 0:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "one_update_lora_only_gradient_sanity",
+                                "lora_tensors_with_grad": gradients["lora_tensors_with_grad"],
+                                "lora_tensors_with_finite_grad": gradients["lora_tensors_with_finite_grad"],
+                                "projector_tensors_with_grad": gradients["projector_tensors_with_grad"],
+                                "frozen_non_lora_tensors_with_grad": gradients["frozen_non_lora_tensors_with_grad"],
+                                "lora_grad_norm_summary": gradients["lora_grad_norm_summary"],
+                                "passed": True,
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
             mean_kl_value = float(sum(group_kl_values) / GROUP_SIZE)
             mean_grpo_loss = float(sum(group_grpo_losses) / GROUP_SIZE)
             mean_total_loss = float(sum(group_total_losses) / GROUP_SIZE)
@@ -1530,12 +1996,12 @@ def main() -> None:
                 "beta": float(kl_config["beta"]),
                 "optimization_signal": optimization_signal,
             }
-            if (kl_config["enabled"] or not all_advantages_zero) and not gradients["all_510_trainable_present"]:
+            if (kl_config["enabled"] or not all_advantages_zero) and not gradients["all_expected_trainable_gradients_present"]:
                 emergency_record["gradient_case"] = "A_missing_gradients"
-                raise RuntimeError("missing Case-B LoRA or mlp1 projector gradients")
+                raise RuntimeError("missing expected LoRA or projector gradients")
             if (kl_config["enabled"] or not all_advantages_zero) and not gradients["all_finite"]:
                 emergency_record["gradient_case"] = "B_nonfinite_gradients"
-                raise RuntimeError("nonfinite Case-B LoRA or mlp1 projector gradients")
+                raise RuntimeError("nonfinite expected LoRA or projector gradients")
             if (kl_config["enabled"] or not all_advantages_zero) and not _all_trainable_finite(model):
                 raise RuntimeError("nonfinite trainable parameter before AdamW step")
             if not gradients["nontrivial"] and optimization_signal:
@@ -1640,12 +2106,56 @@ def main() -> None:
             sample_cursor += 1
             optimizer.step(); summary["optimizer_steps"] += 1
             global_step += 1
+            spatial_density_aggregate = None
+            if spatial_density_interval and global_step % spatial_density_interval == 0:
+                spatial_density_aggregate = aggregate_spatial_density_window(
+                    spatial_density_window,
+                    optimizer_step_end=global_step,
+                    interval=spatial_density_interval,
+                )
+                summary["spatial_density_windows"].append(spatial_density_aggregate)
+                print(json.dumps(spatial_density_aggregate, sort_keys=True), flush=True)
+                spatial_density_window = []
             after_lora = _lora_state(model)
             update_cmp = compare_grad_dicts(after_lora, before_lora)
             if not update_cmp["both_sides_all_finite"] or not _all_trainable_finite(model) or not _optimizer_state_finite(optimizer):
                 raise RuntimeError("nonfinite trainable parameter after AdamW step")
             changed = sum(int(torch.count_nonzero(after_lora[n] != before_lora[n]).item()) for n in before_lora)
             if changed == 0: raise RuntimeError("nontrivial gradients produced no LoRA parameter update")
+            if global_step == 1 and is_ntp_only_rollout(config):
+                one_update_sanity = {
+                    "event": "one_update_ntp_only_sanity",
+                    "lora_tensors_with_grad": gradients["lora_tensors_with_grad"],
+                    "lora_tensors_with_finite_grad": gradients[
+                        "lora_tensors_with_finite_grad"
+                    ],
+                    "projector_tensors_with_grad": gradients[
+                        "projector_tensors_with_grad"
+                    ],
+                    "frozen_non_lora_tensors_with_grad": gradients[
+                        "frozen_non_lora_tensors_with_grad"
+                    ],
+                    "optimizer_state_finite": _optimizer_state_finite(optimizer),
+                    "all_replay_logprobs_finite": all(
+                        item["replay_logprobs_finite"]
+                        for item in emergency_record[
+                            "first_update_ntp_only_trajectory_diagnostics"
+                        ]
+                    ),
+                    "passed": True,
+                }
+                if (
+                    one_update_sanity["lora_tensors_with_grad"]
+                    != EXPECTED_LORA_TENSORS
+                    or one_update_sanity["lora_tensors_with_finite_grad"]
+                    != EXPECTED_LORA_TENSORS
+                    or one_update_sanity["projector_tensors_with_grad"] != 0
+                    or one_update_sanity["frozen_non_lora_tensors_with_grad"] != 0
+                    or not one_update_sanity["optimizer_state_finite"]
+                    or not one_update_sanity["all_replay_logprobs_finite"]
+                ):
+                    raise RuntimeError("NTP-only first-update sanity contract failed")
+                print(json.dumps(one_update_sanity, sort_keys=True), flush=True)
             record = {**emergency_record, "global_step": global_step, "sample_cursor_after_step": sample_cursor,
                 "optimizer_step_count_after_group": global_step, "step_status": "optimizer_step_completed", "optimizer_step_skipped": False,
                 "skipped_zero_advantage_group_count": skipped_zero_advantage_group_count,
@@ -1653,7 +2163,8 @@ def main() -> None:
                 "changed_lora_elements": changed, "lora_parameter_update_norm": _update_norm(before_lora, after_lora),
                 "trainable_parameters_finite_after_step": _all_trainable_finite(model), "comparison": update_cmp}, "optimizer_state_devices": _optimizer_devices(optimizer),
                 "adamw_state_finite_after_step": _optimizer_state_finite(optimizer),
-                "per_gpu_memory_after_step": _memory(devices), "optimizer_steps_this_process": summary["optimizer_steps"]}
+                "per_gpu_memory_after_step": _memory(devices), "optimizer_steps_this_process": summary["optimizer_steps"],
+                "spatial_density_window_aggregate": spatial_density_aggregate}
             if not all(v["below_capacity"] for v in record["per_gpu_memory_after_step"].values()): raise RuntimeError("GPU capacity exceeded")
             _append_jsonl(metrics_path, record); emergency_written = True; emergency_record = None
             summary["trajectories"] += GROUP_SIZE

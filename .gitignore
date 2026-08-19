@@ -46,6 +46,8 @@ unit_test*.*
 Embodied/PY=
 Embodied/export
 Embodied/mkdir
+/physical
+/how --name-status --stat HEAD
 
 # Heavy fine-tuning artifacts (adapters / projector weights / logs)
 *.safetensors
@@ -53,3 +55,13 @@ Embodied/results/finetuning/**/mlp1.pt
 Embodied/results/finetuning/**/checkpoint-*/
 Embodied/results/finetuning/**/*.bak_*
 
+
+# Large generated experiment outputs
+Embodied/results/sanity_overfit/
+Embodied/results/sanity_overfit_joint/
+Embodied/results/finetuning/
+Embodied/results/chestxray8_hybrid_grpo_native/
+Embodied/results/chestxray8_pbd_grpo/
+Embodied/results/chestxray8_pbd_grpo_native/
+Embodied/results/generalization_joint_corrected/
+Embodied/evaluation/chestxray8/results/

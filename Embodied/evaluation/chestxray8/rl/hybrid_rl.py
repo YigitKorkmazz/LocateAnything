@@ -841,11 +841,21 @@ class HybridRolloutReplayer:
         tokenizer,
         *,
         logprob_objective: str = DEFAULT_LOGPROB_OBJECTIVE,
+        expected_decoder_path: str = "hybrid",
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.token_ids = resolve_hybrid_token_ids(model)
         self.logprob_objective = resolve_logprob_objective(logprob_objective)
+        self.expected_decoder_path = str(expected_decoder_path)
+
+    def _validate_decoder_path(self, trace: RolloutTrace) -> None:
+        actual = str(getattr(trace, "decoder_path", "pbd"))
+        if actual != self.expected_decoder_path:
+            raise RuntimeError(
+                f"rollout replayer requires decoder_path={self.expected_decoder_path}; "
+                f"received {actual}"
+            )
 
     def _projector_visual_features(self, pixel_values, image_grid_hws):
         pixel_values = pixel_values.to(self.model.language_model.dtype)
@@ -1020,8 +1030,7 @@ class HybridRolloutReplayer:
         """
         if input_ids[0].tolist() != trace.prompt_token_ids:
             raise RuntimeError("replay prompt does not match rollout trace")
-        if getattr(trace, "decoder_path", "pbd") != "hybrid":
-            raise RuntimeError("HybridRolloutReplayer requires decoder_path=hybrid")
+        self._validate_decoder_path(trace)
         self.model.eval()
         block_size = trace.sampling.block_size
         device = input_ids.device
@@ -1052,8 +1061,17 @@ class HybridRolloutReplayer:
                 on_scored_block_begin(scored_index, block)
             inject_visual = (not carry_cache) or (not block_logps)
             prior_cache = past_key_values
-            _set_rotary_debug_context(self.model, current_hybrid_block_index=block.block_index,
-                                      branch="NTP fallback" if block.source == "ntp_fallback" else "PBD proposal/replay")
+            _set_rotary_debug_context(
+                self.model,
+                current_hybrid_block_index=block.block_index,
+                branch=(
+                    "NTP only"
+                    if block.source == "ntp_only"
+                    else "NTP fallback"
+                    if block.source == "ntp_fallback"
+                    else "PBD proposal/replay"
+                ),
+            )
             value, past_key_values, per_token_logps = self._score_one_block(
                 block=block,
                 generated=generated,
@@ -1131,7 +1149,8 @@ class HybridRolloutReplayer:
                         "support_kind": str(slot.support_kind),
                         "committed_to_generated_stream": committed,
                         "rejected_pbd_proposal_token": bool(
-                            not committed and block.source != "ntp_fallback"
+                            not committed
+                            and block.source not in {"ntp_fallback", "ntp_only"}
                         ),
                         "mask": 1,
                     }
@@ -1183,8 +1202,7 @@ class HybridRolloutReplayer:
         """
         if input_ids[0].tolist() != trace.prompt_token_ids:
             raise RuntimeError("replay prompt does not match rollout trace")
-        if getattr(trace, "decoder_path", "pbd") != "hybrid":
-            raise RuntimeError("HybridRolloutReplayer requires decoder_path=hybrid")
+        self._validate_decoder_path(trace)
         if use_cache:
             raise RuntimeError(
                 "iter_scored_block_logprobs requires use_cache=False "
@@ -1253,8 +1271,7 @@ class HybridRolloutReplayer:
         """
         if input_ids[0].tolist() != trace.prompt_token_ids:
             raise RuntimeError("replay prompt does not match rollout trace")
-        if getattr(trace, "decoder_path", "pbd") != "hybrid":
-            raise RuntimeError("HybridRolloutReplayer requires decoder_path=hybrid")
+        self._validate_decoder_path(trace)
         self.model.eval()
         block_size = trace.sampling.block_size
         device = input_ids.device
@@ -1323,8 +1340,7 @@ class HybridRolloutReplayer:
         """
         if input_ids[0].tolist() != trace.prompt_token_ids:
             raise RuntimeError("replay prompt does not match rollout trace")
-        if getattr(trace, "decoder_path", "pbd") != "hybrid":
-            raise RuntimeError("HybridRolloutReplayer requires decoder_path=hybrid")
+        self._validate_decoder_path(trace)
         self.model.eval()
         block_size = trace.sampling.block_size
         device = input_ids.device
