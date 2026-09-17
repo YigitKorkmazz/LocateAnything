@@ -1,0 +1,76 @@
+# Resolved experiment contract for production_grpo_fast.
+#
+# This file documents the fixed configuration; it is not parsed by train.py.
+# Every value here is pinned as a module-level constant in runtime.py /
+# sampler.py / grpo_step.py (see the file/line noted in each comment) so
+# that changing it requires an explicit code change and code review, not a
+# silent CLI/YAML edit. This mirrors, and is checked against, the existing
+# rl/*.yaml contract style in this repository.
+
+model:
+  name_or_path: nvidia/LocateAnything-3B          # runtime.py:MODEL_NAME
+  revision: c32291ca5e996f5a7a485845b4f57a233936bba0  # runtime.py:PINNED_REVISION
+  dtype: bfloat16
+  attn_implementation: sdpa
+  vision_frozen: true
+  projector_frozen: true                          # runtime.py never calls unfreeze_mlp1
+
+lora:
+  rank: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  scope: language_model (all 36 decoder layers)
+  expected_trainable_tensors: 504
+  expected_trainable_parameters: 14966784
+
+rollout:
+  path: stochastic_native_ntp_rl (slow/NTP, no PBD/MTP/Hybrid fallback)
+  temperature: 1.2
+  top_p: 0.9
+  top_k: 0
+  repetition_penalty: 1.0
+  max_new_tokens: 256
+  group_size: 4                                    # G, grpo_step.py:GENERATIONS
+
+objective:
+  loss: L_GRPO
+  clip_epsilon: 0.2
+  kl_beta: 0.0                                      # KL off
+  advantage_normalization: within_group_only        # rl.grpo.group_relative_advantages
+
+rewards:
+  parser: native_locateanything
+  format: {weight: 1.0}
+  spatial: {weight: 1.0, iou_threshold: 0.5, comparison: strict_greater_than}
+  semantic: {weight: 1.0, model: medclip_pinned, invalid_box_fallback: 0.0}
+
+optimizer:
+  name: AdamW
+  learning_rate: 1.0e-6
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  max_grad_norm: 1.0
+  schedule: linear_decay
+  warmup_steps: 0
+
+training:
+  seed: 42
+  train_examples: 790
+  train_manifest: splits/train80_pairs_seed42.jsonl
+  train_manifest_sha256: a2b1c25f652f90e8d93e58b33ee74aa5eb09db4df7c6b37e760f5e5238c2e3b0
+  internal_validation_split: none
+  heldout_manifest: splits/test_pairs_seed42.jsonl  # never read by this backend
+  epochs: 20
+  total_prompt_group_exposures: 15800               # 790 * 20
+  groups_per_optimizer_update: 4                     # fixed, sampler.py:GROUPS_PER_UPDATE
+  total_optimizer_steps: 3950                        # 15800 / 4, exact
+  checkpoint_interval: every_epoch_boundary_at_next_completed_window
+
+distributed:
+  excluded_gpus: [0]                                 # busy with another job during Phase 1; existing project convention
+  allowed_gpus: [1, 2, 3]
+  production_design: {world_size: 2, groups_per_worker: [2, 2]}
+  three_gpu_benchmark_design: {world_size: 3, groups_per_worker: [2, 1, 1]}
+  reduction: allreduce_sum_of_globally_normalized_local_gradients
