@@ -2050,6 +2050,9 @@ def train_loop(
     stopped_by_loss = False
     model.train()
     optimizer.zero_grad(set_to_none=True)
+    group_losses: List[float] = []
+    group_ntp: List[float] = []
+    group_mtp: List[float] = []
 
     # Step-based training: when --max-steps is set, cycle data until that count
     # (do not stop early solely because --num-epochs exhausted).
@@ -2084,6 +2087,10 @@ def train_loop(
                 if not torch.isfinite(loss):
                     raise RuntimeError(f"Non-finite loss at step {global_step}: {loss}")
                 (loss / accum).backward()
+                group_losses.append(float(loss.detach().float().cpu()))
+                if loss_ntp_f is not None:
+                    group_ntp.append(loss_ntp_f)
+                    group_mtp.append(loss_mtp_f)
             except torch.cuda.OutOfMemoryError as e:
                 report = {
                     "ok": False,
@@ -2121,7 +2128,14 @@ def train_loop(
                     max_grad_norm=max_grad_norm,
                 )
                 global_step += 1
-                loss_f = float(loss.detach().float().cpu())
+                # Mean over the accumulation group, not just its last microbatch.
+                loss_f = sum(group_losses) / len(group_losses)
+                if group_ntp:
+                    loss_ntp_f = sum(group_ntp) / len(group_ntp)
+                    loss_mtp_f = sum(group_mtp) / len(group_mtp)
+                group_losses.clear()
+                group_ntp.clear()
+                group_mtp.clear()
                 loss_window.append(loss_f)
                 loss_ma = float(sum(loss_window) / len(loss_window))
                 hist_row = {
