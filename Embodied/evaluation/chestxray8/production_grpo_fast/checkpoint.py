@@ -56,7 +56,23 @@ def restore_rng_state(state: Dict[str, Any]) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
     torch.set_rng_state(state["torch"])
-    torch.cuda.set_rng_state_all(state["cuda"])
+    # `state["cuda"]` has one entry per CUDA device that was *visible to the
+    # process* on the host that wrote the checkpoint (torch.cuda.set_device
+    # never restricts visibility, only the active device -- see
+    # distributed.py). A resume on a different host can see a different
+    # number of GPUs, in which case torch.cuda.set_rng_state_all would
+    # IndexError into torch.cuda.default_generators. As this module's
+    # docstring notes, CUDA RNG state is defense-in-depth only --
+    # `next_global_group_index` is what exact resume actually depends on --
+    # so on a mismatch we restore whatever devices exist here and skip the
+    # rest rather than fail the resume.
+    saved_cuda_states = state["cuda"]
+    available = torch.cuda.device_count()
+    if len(saved_cuda_states) == available:
+        torch.cuda.set_rng_state_all(saved_cuda_states)
+    else:
+        for device_index, device_state in enumerate(saved_cuda_states[:available]):
+            torch.cuda.set_rng_state(device_state, device_index)
 
 
 def save_checkpoint(

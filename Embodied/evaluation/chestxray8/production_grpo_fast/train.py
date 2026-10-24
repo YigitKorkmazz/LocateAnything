@@ -228,6 +228,7 @@ def worker_main(
             max_grad_norm=args.max_grad_norm,
             audit=(windows_run == 0 or (args.audit_interval > 0 and windows_run % args.audit_interval == 0)),
             kl_beta=args.kl_beta,
+            spatial_reward_mode=args.spatial_reward_mode,
         )
         scheduler.step()
         step_elapsed = time.monotonic() - step_start
@@ -372,11 +373,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--master-port", type=int, default=29511)
     parser.add_argument("--log-all-ranks", action="store_true", default=True)
 
+    # --- Spatial reward mode ---
+    # "binary" (default, MedGround-R1 Sec. 2.3): reward = 1 if IoU > 0.5 else 0.
+    # "continuous" (Visual-RFT, arXiv:2503.01785 Sec. 3.2.1 Eq. 6): reward =
+    #   raw IoU directly, no threshold -- matches the supervisor-provided
+    #   reference script's SPATIAL_REWARD_MODE=continuous. See
+    #   rewards_adapter.py's module docstring for the exact mapping (their
+    #   R_conf term has no counterpart in this single-box setup and is
+    #   omitted, matching their own implementation's degenerate case).
+    parser.add_argument("--spatial-reward-mode", choices=["binary", "continuous"], default="binary")
+
     # --- Continuous/curriculum spatial reward (MedLoc-R1, arXiv:2603.28120) ---
     # Off by default: reward_pipeline.iou_threshold then stays fixed at 0.5
     # (paper-faithful MedGround-R1 spatial reward), reproducing prior runs
     # exactly. See iou_threshold_scheduler.py for the mechanism and
     # distributed.sync_iou_threshold_across_ranks for the multi-GPU design.
+    # Mutually exclusive with --spatial-reward-mode continuous: a curriculum
+    # over a fixed IoU threshold is meaningless once the reward IS the raw
+    # IoU (no threshold at all).
     parser.add_argument("--iou-sched-enabled", action="store_true", default=False)
     parser.add_argument("--iou-sched-tau0", type=float, default=0.3)
     parser.add_argument("--iou-sched-tau-target", type=float, default=0.8)
@@ -395,7 +409,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # reproduce the old (no-KL) behavior exactly (skips the extra reference-
     # policy forward pass entirely).
     parser.add_argument("--kl-beta", type=float, default=0.04)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.spatial_reward_mode == "continuous" and args.iou_sched_enabled:
+        raise ValueError(
+            "--spatial-reward-mode continuous and --iou-sched-enabled are mutually "
+            "exclusive: continuous mode uses the raw IoU directly, so a curriculum "
+            "over a fixed threshold has nothing to act on."
+        )
+    return args
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

@@ -110,6 +110,56 @@ def test_total_is_unweighted_sum() -> None:
     assert totals[0] == 1.0 + 1.0 + 0.4
 
 
+def test_continuous_mode_uses_raw_iou_not_threshold() -> None:
+    """Visual-RFT R_IoU: spatial_reward IS the raw IoU, no threshold.
+
+    Reuses the exact-IoU==0.5 case from test_spatial_reward_strict_iou_
+    greater_than_half, where binary mode scores spatial=0.0 (strict '>'
+    fails) -- continuous mode must instead score spatial=0.5 exactly.
+    """
+    scorer = FixedSemanticScorer(0.2)
+    pipeline = build_reward_pipeline(scorer)
+    exact_half = FakeTrace("<ref>x</ref><box><100><100><300><500></box>", (100, 100, 300, 500), True, "ntp_only")
+    totals, components = score_group(pipeline, PAIR, [exact_half], spatial_reward_mode="continuous")
+    c = components[0]
+    assert c.final_iou == 0.5
+    assert c.spatial_reward == 0.5, "continuous mode must use the raw IoU, not the binary threshold reward"
+    assert totals[0] == c.format_reward + 0.5 + c.semantic_reward
+
+    # Binary mode on the SAME trace must be unaffected (mode is per-call, not global state).
+    totals_binary, components_binary = score_group(pipeline, PAIR, [exact_half])
+    assert components_binary[0].spatial_reward == 0.0
+
+
+def test_continuous_mode_invalid_box_still_zero() -> None:
+    """Unparseable / invalid-geometry completions must still score spatial=0.0
+    in continuous mode (matches Visual-RFT's own convention: 'unmatched
+    bboxes have an IoU of 0'), not raise or silently pass through a stale
+    binary value."""
+    scorer = FixedSemanticScorer(0.0)
+    pipeline = build_reward_pipeline(scorer)
+    no_box = FakeTrace("<ref>Cardiomegaly</ref>", None, False, "none")
+    totals, components = score_group(pipeline, PAIR, [no_box], spatial_reward_mode="continuous")
+    assert components[0].spatial_reward == 0.0
+    assert totals[0] == 0.0
+
+    invalid_geometry = FakeTrace("<ref>x</ref><box><300><300><100><100></box>", (300, 300, 100, 100), True, "ntp_only")
+    totals, components = score_group(pipeline, PAIR, [invalid_geometry], spatial_reward_mode="continuous")
+    assert components[0].spatial_reward == 0.0
+
+
+def test_invalid_spatial_reward_mode_rejected() -> None:
+    scorer = FixedSemanticScorer(0.0)
+    pipeline = build_reward_pipeline(scorer)
+    trace = FakeTrace("<ref>x</ref><box><100><100><300><300></box>", (100, 100, 300, 300), True, "ntp_only")
+    try:
+        score_group(pipeline, PAIR, [trace], spatial_reward_mode="bogus")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for an unrecognized spatial_reward_mode")
+
+
 def main() -> None:
     tests = [obj for name, obj in globals().items() if name.startswith("test_") and callable(obj)]
     for test in tests:

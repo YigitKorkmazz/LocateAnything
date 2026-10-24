@@ -23,12 +23,13 @@ restore optimizer/scheduler/RNG state; that state is simply unused here).
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -86,8 +87,23 @@ def evaluate(
     device: torch.device,
     generations: int,
     max_new_tokens: int,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     sampling = _sampling_config()
+    if temperature is not None or top_p is not None:
+        # dataclasses.replace: PBDSamplingConfig is frozen, and _sampling_config()
+        # already ran .validate() once against the training-matched defaults --
+        # only the two fields callers may override here are touched, everything
+        # else (top_k, repetition_penalty, block_size) stays exactly as training
+        # used it.
+        overrides = {}
+        if temperature is not None:
+            overrides["temperature"] = float(temperature)
+        if top_p is not None:
+            overrides["top_p"] = float(top_p)
+        sampling = dataclasses.replace(sampling, **overrides)
+        sampling.validate()
     results: List[Dict[str, Any]] = []
     for index, pair in enumerate(pairs):
         start = time.monotonic()
@@ -164,6 +180,16 @@ def main() -> None:
     parser.add_argument("--gpu", type=int, default=1, help="physical GPU index to run evaluation on")
     parser.add_argument("--generations", type=int, default=sampler.GENERATIONS, help="rollouts per heldout example (default matches training G)")
     parser.add_argument("--max-new-tokens", type=int, default=MAX_NEW_TOKENS)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="override the training-matched sampling temperature (default: unset, uses the "
+        "same T=1.2 training used). Lower (e.g. 0.7) removes exploration noise from the "
+        "measurement; the zero-shot/SFT baselines this backend is compared against were "
+        "themselves evaluated at T=0.7.",
+    )
+    parser.add_argument("--top-p", type=float, default=None, help="override the training-matched top_p (default: unset, uses top_p=0.9)")
     args = parser.parse_args()
 
     device = torch.device(f"cuda:{args.gpu}")
@@ -199,6 +225,8 @@ def main() -> None:
         device=device,
         generations=args.generations,
         max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
     )
     summary = summarize(results)
     print("\n=== SUMMARY ===")
@@ -214,6 +242,8 @@ def main() -> None:
                 "load_report": load_report,
                 "generations_per_example": args.generations,
                 "max_new_tokens": args.max_new_tokens,
+                "temperature": args.temperature if args.temperature is not None else 1.2,
+                "top_p": args.top_p if args.top_p is not None else 0.9,
                 "summary": summary,
                 "per_example_results": results,
             },

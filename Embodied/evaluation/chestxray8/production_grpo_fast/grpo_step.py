@@ -75,6 +75,7 @@ def execute_prompt_group(
     checkpoint_layers: Optional[Set[int]] = None,
     do_backward: bool = True,
     kl_beta: float = 0.0,
+    spatial_reward_mode: str = "binary",
 ) -> Dict[str, Any]:
     del optimizer_or_none
     inputs = prepare_group_inputs(processor, pair, device)
@@ -94,7 +95,7 @@ def execute_prompt_group(
             seeds=seeds,
         )
 
-    totals, components = score_group(reward_pipeline, pair, traces)
+    totals, components = score_group(reward_pipeline, pair, traces, spatial_reward_mode=spatial_reward_mode)
     advantages = group_relative_advantages(totals).to(device)
 
     decoder_kwargs = {
@@ -161,6 +162,7 @@ def run_accumulation_window(
     audit: bool = False,
     capture_grads_and_skip_step: bool = False,
     kl_beta: float = 0.0,
+    spatial_reward_mode: str = "binary",
 ) -> Dict[str, Any]:
     """Run this rank's local groups of one accumulation window and step.
 
@@ -194,6 +196,7 @@ def run_accumulation_window(
                 checkpoint_layers=checkpoint_layers,
                 do_backward=True,
                 kl_beta=kl_beta,
+                spatial_reward_mode=spatial_reward_mode,
             )
         )
         # `torch.utils.checkpoint` recompute + many sequential groups without
